@@ -71,6 +71,13 @@ function cleanConfig(obj){
  c.gallerySubtitle=text(obj.gallerySubtitle,400);
  c.theme=['default','eid','thanksgiving','christmas','halloween','newyear'].includes(obj.theme)?obj.theme:'default';
  c.accent=/^#[0-9a-fA-F]{6}$/.test(obj.accent||'')?obj.accent:DEFAULT_SITE.accent;
+ c.themeProfiles={};
+ for(const [id,base] of Object.entries(DEFAULT_SITE.themeProfiles)){
+  const src=obj.themeProfiles?.[id]||{};
+  const heroImage=text(src.heroImage,500);if(!validURL(heroImage))throw Error('Invalid seasonal hero photo');
+  const prices={};for(const v of DEFAULT_SITE.vehicles){const n=src.prices?.[v.id];if(n!==undefined&&n!==null&&String(n)!==''){const price=Number(n);if(!Number.isFinite(price)||price<0||price>10000)throw Error('Invalid holiday pricing');prices[v.id]=Math.round(price);}}
+  c.themeProfiles[id]={greeting:text(src.greeting,90)||base.greeting||'',headline:text(src.headline,180),description:text(src.description,380),heroImage,accent:/^#[0-9a-fA-F]{6}$/.test(src.accent||'')?src.accent:'',background:/^#[0-9a-fA-F]{6}$/.test(src.background||'')?src.background:'',prices};
+ }
  c.about.points=(Array.isArray(obj.about?.points)?obj.about.points:[]).slice(0,5).map(x=>text(x,120));
  c.services=(Array.isArray(obj.services)?obj.services:[]).slice(0,8).map((s,i)=>({id:text(s.id,40)||`s${i}`,number:String(i+1).padStart(2,'0'),name:text(s.name,80),description:text(s.description,400),icon:text(s.icon,50)}));
  c.vehicles=DEFAULT_SITE.vehicles.map(v=>{
@@ -147,7 +154,8 @@ export async function onRequest({request,env}){
    if(name.length<2||!/^\S+@\S+\.\S+$/.test(email)||phone.length<7||!c.vehicles.some(v=>v.id===vehicle)||!dateOk(date)||!c.booking.timeSlots.includes(time)||!['mobile','dropoff'].includes(service_location))return err('Please complete all required fields');
    if(service_location==='mobile'&&address.length<8)return err('Please enter the mobile detailing address');
    if((c.booking.blockedDates||[]).includes(date))return err('This date is not available',409);
-   let p=c.vehicles.find(v=>v.id===vehicle).price,accountId=null;
+   const holiday=c.themeProfiles?.[c.theme]?.prices||{};
+   let p=Number.isFinite(holiday[vehicle])?holiday[vehicle]:c.vehicles.find(v=>v.id===vehicle).price,accountId=null;
    if(sess?.role==='business'){p=Number(sess.prices[vehicle]);accountId=sess.id;if(!Number.isFinite(p)||p<0)return err('Price unavailable');}
    const id=crypto.randomUUID(),reference='TM-'+crypto.randomUUID().slice(0,8).toUpperCase();
    const inserted=await env.DB.prepare(`INSERT INTO bookings (id,reference,customer_name,email,phone,service_location,address,vehicle,appointment_date,appointment_time,notes,quoted_price,business_account_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM bookings WHERE appointment_date=? AND status IN ('pending','confirmed')) < ? AND NOT EXISTS (SELECT 1 FROM bookings WHERE appointment_date=? AND appointment_time=? AND status IN ('pending','confirmed'))`).bind(id,reference,name,email,phone,service_location,address,vehicle,date,time,notes,Math.round(p),accountId,date,c.booking.maxPerDay,date,time).run();
@@ -158,8 +166,19 @@ export async function onRequest({request,env}){
    const b=await readBody(request);if(!b)return err('Invalid request');
    const ref=text(b.reference,40).toUpperCase(),email=text(b.email,180).toLowerCase();
    if(!/^TM-[A-Z0-9]{8}$/.test(ref)||!/^\S+@\S+\.\S+$/.test(email))return err('Booking not found',404);
-   const r=await env.DB.prepare('SELECT reference,vehicle,appointment_date,appointment_time,service_location,status,quoted_price FROM bookings WHERE reference=? AND email=?').bind(ref,email).first();
+   const r=await env.DB.prepare('SELECT reference,vehicle,appointment_date,appointment_time,service_location,status,quoted_price,notes FROM bookings WHERE reference=? AND email=?').bind(ref,email).first();
    return r?json({ok:true,booking:r}):err('Booking not found',404);
+  }
+  if(method==='POST'&&path==='booking-request'){
+   const payload=await readBody(request);if(!payload)return err('Invalid request');
+   const ref=text(payload.reference,40).toUpperCase(),email=text(payload.email,180).toLowerCase();
+   const type=payload.type==='cancel'?'CANCELLATION REQUEST':payload.type==='reschedule'?'DATE / TIME CHANGE REQUEST':null;
+   const message=text(payload.message,350);
+   if(!type||!/^TM-[A-Z0-9]{8}$/.test(ref)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return err('Invalid request');
+   if(type==='DATE / TIME CHANGE REQUEST'&&message.length<8)return err('Describe your requested change');
+   const entry='['+type+' — '+new Date().toISOString().slice(0,16)+' UTC] '+message;
+   const row=await env.DB.prepare("UPDATE bookings SET notes=substr(COALESCE(notes,'') || char(10) || ?, 1, 1800) WHERE reference=? AND email=? AND status NOT IN ('completed','cancelled')").bind(entry,ref,email).run();
+   return row.meta?.changes?json({ok:true,message:'Your request has been recorded. TM Detailers will review it.'}):err('Booking not found or already completed',404);
   }
   const sess=await readSession(request,env);
   if(!path.startsWith('admin/')||sess?.role!=='admin')return err('Not authorized',401);

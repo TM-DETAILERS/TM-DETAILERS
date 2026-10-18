@@ -1,28 +1,32 @@
-# TM Detailers | Luxury Automotive Website
+# TM Detailers — Essentials V3
 
-A redesigned Cloudflare Pages website based on the existing TM Detailers HTML file.
+A simpler, multi-page redesign of your existing Cloudflare Pages website. This is an **upgrade**, not a replacement Cloudflare account.
 
-**What's included**
+## Where things are
 
-- Luxury charcoal / steel-blue storefront, mobile navigation, smooth transitions and real TM logo.
-- Editable hero, about text, Instagram username/link, contact details, services, prices, promotion banner, and seasonal palette.
-- Gallery: owner can upload images, add HTTPS image links, edit captions, reorder images and remove photos. Uploaded images are stored in D1 as compressed JPEGs.
-- Securely signed owner sessions and server-side owner password check (password stored as Cloudflare secret, not HTML).
-- Business access codes with per-company vehicle rates. Optional custom codes (e.g. TM-BIZ976112), account disable and code rotation. Codes are hashed in the database and only displayed when created/rotated.
-- Public appointment requests, max bookings/day, blocked dates and slot collision checks, reference lookup, owner view/status update.
-- Mobile or drop-off requests. Mobile customers must supply an address.
+- `/` — simplified homepage with holiday greeting, prominent booking button, three quick links and a short introduction.
+- `/pricing/` — separate services and full-detail vehicle pricing page.
+- `/checkout/` — four-step booking checkout: vehicle → date/location → contact → review. An estimated price is visible throughout. After successful submission, a real booking reference is returned by the existing `/api/bookings` backend.
+- `/track/` — look up a booking by reference plus email, see status and request a change.
+- `/business/` — existing secure business client pricing and appointment requests.
+- `/studio/` — separate Owner Studio sign-in and existing management dashboard, including holiday settings.
 
-**IMPORTANT:** The secure features only work once you finish the setup in `SETUP.md`. Until then, the site loads as a public preview, booking is disabled, and admin/business sign-ins cannot authenticate. Do not ask customers to book through an unconfigured demo.
+## Seasonal design
 
-## Folder layout
+Eid, Christmas, Halloween, Thanksgiving and New Year include distinct greetings, artwork motifs, backgrounds and colours. Owner Studio → Seasonal Studio lets you edit the greeting, campaign headline, description, highlight colours, photo and vehicle-specific seasonal prices. Saved prices are used by the **same booking backend** that generates the receipt.
 
-- `public/` — ONLY these files are published directly to visitors. Build output directory MUST be `public`.
-- `functions/api/[[path]].js` — Cloudflare Pages Functions API (not served as a public static file).
-- `database/schema.sql` — D1 database tables (run one time).
-- `SETUP.md` — Cloudflare dashboard setup instructions.
+Owner Studio continues to support business accounts, bookings, pricing, service descriptions and photo gallery management.
 
-## Notes about earlier HTML site
+## Booking vs payment
 
-The original single-file website kept most information locally in the browser and included an unprotected login. This replaces that with server-backed appointment requests, owner controls and business account sessions. It does **not** include actual checkout, automatic email/text notifications, a synchronized Instagram feed, customer self-service rescheduling, or a full two-package checkout workflow. Existing pricing is set as defaults and editable in Studio. The business account interface changes rates and booking context, not every visual section of the site.
+The checkout is a **booking-request checkout**, not an online card payment checkout. It collects no card details and charges no money. Only after the server records an appointment request does it display a booking reference. Final appointment confirmation and payment are arranged directly with TM Detailers. No Stripe/Square integration has been configured.
 
-Do not place passwords, access tokens, or private booking data into HTML, GitHub or this archive. Test real bookings after configuring D1.
+## No new database / domain setup
+
+Continue using your existing Cloudflare Pages project, D1 binding `DB`, secrets `ADMIN_PASSWORD` and `SESSION_SECRET`, and `tmdetailers.ca` DNS records. Do not recreate any of them.
+
+**Read `UPGRADE-V3.md` before pushing.** Prefer a separate GitHub review branch to inspect the updated site before replacing the current live homepage.
+
+## Privacy
+
+Never put owner passwords, secret keys or customer information in public files or GitHub. Photos used in the homepage gallery come from your Owner Studio; the vehicle drawing is a generic illustration and **not presented as actual customer work**.

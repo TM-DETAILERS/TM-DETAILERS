@@ -34,5 +34,13 @@ export const DEFAULT_SITE = {
   about:{eyebrow:'THE DIFFERENCE IS IN THE DETAILS',title:'We take clean seriously.',body:'TM Detailers is a local detailing business built around careful work, clear communication and an experience worth coming back for.',points:['Clear, upfront pricing','Interior + exterior options','Service at your location or ours']},
   sections:{services:true,pricing:true,gallery:true,about:true,booking:true},
   theme:'default',
-  accent:'#477ebd'
+  themeProfiles:{
+    default:{greeting:'',headline:'',description:'',heroImage:'',prices:{}},
+    eid:{greeting:'Eid Mubarak',headline:'A FRESH START. A FINER FINISH.',description:'Celebrate with a vehicle that feels renewed.',heroImage:'',prices:{}},
+    thanksgiving:{greeting:'Happy Thanksgiving',headline:'A LITTLE MORE TO BE THANKFUL FOR.',description:'Seasonal care for every journey home.',heroImage:'',prices:{}},
+    christmas:{greeting:'Merry Christmas',headline:'MAKE EVERY ARRIVAL FEEL SPECIAL.',description:'Holiday-ready detailing, with the same TM standard.',heroImage:'',prices:{}},
+    halloween:{greeting:'Happy Halloween',headline:'DETAILS WORTH A SECOND LOOK.',description:'A darker seasonal look. Exceptional care.',heroImage:'',prices:{}},
+    newyear:{greeting:'Happy New Year',headline:'START THE YEAR IN FRESH CONDITION.',description:'A clean beginning, down to the last detail.',heroImage:'',prices:{}}
+  },
+  accent:'#b49b78'
 };

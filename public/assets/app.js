@@ -6,7 +6,7 @@ const money = p => '$'+Number(p??0).toLocaleString('en-CA',{maximumFractionDigit
 const copyObj = val => JSON.parse(JSON.stringify(val));
 let site=copyObj(DEFAULT_SITE), draft=null, backendReady=false, session=null, accounts=[], bookings=[], activeTab='overview';
 async function api(endpoint, opts={}){
- const response=await fetch('/api/'+endpoint,{credentials:'same-origin',...opts,headers:{...(opts.body && typeof opts.body==='string'?{'Content-Type':'application/json'}:{}),...(opts.headers||{})}});
+ const response=await fetch('/api/'+endpoint,{credentials:'same-origin',cache:'no-store',signal:AbortSignal.timeout(18000),...opts,headers:{...(opts.body && typeof opts.body==='string'?{'Content-Type':'application/json'}:{}),...(opts.headers||{})}});
  let data;try{data=await response.json();}catch{throw Error('The server did not return valid data');}
  if(!response.ok||!data.ok)throw Error(data.error||'Request failed');
  return data;
@@ -15,17 +15,22 @@ const send=(endpoint,body,method='POST')=>api(endpoint,{method,body:JSON.stringi
 function changeAlert(el,message,problem=false){if(!el)return;el.textContent=message;el.hidden=!message;el.classList.toggle('error',problem);}
 function titleCase(s){return (s||'').replace(/(^|\s)\S/g,c=>c.toUpperCase());}
 function renderTitle(){
- const title=(session?.role==='business'?'YOUR FLEET. OUR STANDARD.':site.hero.title)||'';
+ const profile=site.themeProfiles?.[site.theme];
+ const title=(profile?.headline||site.hero.title)||'';
  const dot=title.indexOf('. ');
  $('#hero-title').innerHTML=dot<0?esc(title):esc(title.slice(0,dot+1))+'<br><em>'+esc(title.slice(dot+2))+'</em>';
 }
 function renderSite(){
  document.body.dataset.theme=site.theme||'default';
- document.documentElement.style.setProperty('--blue',/^#[0-9a-fA-F]{6}$/.test(site.accent)?site.accent:'#477ebd');
+ const profile=site.themeProfiles?.[site.theme]||{};
+ for(const [key,variable] of [['accent','--atelier-accent'],['background','--atelier-bg']]){document.body.style.removeProperty(variable);if(/^#[0-9a-fA-F]{6}$/.test(profile[key]||''))document.body.style.setProperty(variable,profile[key]);}
+ document.documentElement.style.setProperty('--blue',/^#[0-9a-fA-F]{6}$/.test(site.accent)?site.accent:'#b49b78');
  renderTitle();
- $('#hero-eyebrow').textContent=session?.role==='business'?'TM DETAILERS / BUSINESS CLIENTS':site.hero.eyebrow;
- $('#hero-description').textContent=session?.role==='business'?'Welcome to your private business booking experience. Your account pricing is already applied to every vehicle.':site.hero.description;
- const heroSrc=cleanURL(site.hero.image,true);$('#hero-image').src=heroSrc||'/assets/tm-logo.jpg';
+ $('#hero-eyebrow').textContent=site.theme==='default'?site.hero.eyebrow:'TM / '+site.theme.toUpperCase()+' EDITION';
+ $('#hero-description').textContent=profile.description||site.hero.description;
+ const heroSrc=cleanURL(profile.heroImage,true)||cleanURL(site.hero.image,true);
+ $('#hero-image').src=heroSrc||'/assets/tm-logo.jpg';
+ const illustration=$('.hero-vehicle-drawing');if(illustration){illustration.src=heroSrc||'/assets/atelier-vehicle.svg';illustration.style.filter=heroSrc?'brightness(.68) contrast(1.08)':'grayscale(.15)';}
  $('#announcement').hidden=!site.announcement.enabled;
  $('#announcement').textContent=[site.announcement.text,site.announcement.code&&'CODE: '+site.announcement.code].filter(Boolean).join(' · ');
  $('#services-intro').textContent=site.servicesIntro;
@@ -33,10 +38,10 @@ function renderSite(){
  $('#pricing-intro').textContent=site.pricingIntro;
  $('#pricing-heading').innerHTML=session?.role==='business'?'Your business <span class="soft">rates.</span>':'Straightforward <span class="soft">pricing.</span>';
  $('#business-banner').hidden=session?.role!=='business';
- $('#nav-business').textContent=session?.role==='business'?session.label+' ↗':'Business login ↗';
+ $('#nav-business').innerHTML='Business access <span aria-hidden="true">↗</span>'; 
  if(session?.role==='business')$('#business-welcome').textContent=session.label+' · Business rates';
  $('#pricing-grid').innerHTML=site.vehicles.map((v,i)=>{
-  const price=session?.role==='business'&&session.prices?session.prices[v.id]:v.price;
+  const price=(site.themeProfiles?.[site.theme]?.prices||{})[v.id]??v.price;
   return `<article class="price-card reveal"><span class="price-n">0${i+1} / VEHICLE</span><h3>${esc(v.name)}</h3><p class="price-sub">${esc(v.description)}</p><div class="price-money">${money(price)}<small>CAD</small></div><a href="#book" data-vehicle="${esc(v.id)}">BOOK THIS VEHICLE <span>↗</span></a></article>`;
  }).join('');
  $('#gallery-heading').textContent=site.galleryTitle;
@@ -72,7 +77,7 @@ function renderSite(){
  calcQuote();revealSetup();
 }
 const formatTime = t => { const [h,m]=(t||'00:00').split(':').map(Number);return String(h%12||12)+':'+String(m).padStart(2,'0')+(h<12?' AM':' PM'); };
-function calcQuote(){const id=$('#book-vehicle')?.value;const v=site.vehicles.find(x=>x.id===id);$('#book-quote').textContent=money(session?.role==='business'&&session.prices?session.prices[id]??v?.price:v?.price)+' CAD';}
+function calcQuote(){const id=$('#book-vehicle')?.value;const v=site.vehicles.find(x=>x.id===id);$('#book-quote').textContent=money((site.themeProfiles?.[site.theme]?.prices||{})[id]??v?.price)+' CAD';}
 function revealSetup(){
  if(!('IntersectionObserver' in window)){document.querySelectorAll('.reveal').forEach(e=>e.classList.add('is-visible'));return;}
  const obs=new IntersectionObserver((entries,o)=>entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('is-visible');o.unobserve(e.target);}}),{threshold:.08,rootMargin:'0px 0px 25px 0px'});
@@ -113,16 +118,16 @@ async function book(e){e.preventDefault();if(!backendReady)return;
   const check=await api('availability?date='+encodeURIComponent(date));
   if(!check.available)throw Error(check.reason||'That date is unavailable. Please choose another date.');
   const reply=await send('bookings',b);
-  openDialog(`<div class="dialog-eyebrow">REQUEST RECEIVED</div><h2 id="dialog-title">You're on our list.</h2><span class="success-mark">✓</span><p>Thanks for booking with TM Detailers! We’ll contact you to confirm the appointment.</p><div class="booking-result"><strong>${esc(reply.reference)}</strong><p>Save this reference to check your booking status later.</p></div><button class="button button-outline button-full" id="copy-booking-ref">Copy booking reference ↗</button>`);
+  openDialog(`<div class="dialog-eyebrow">REQUEST RECEIVED</div><h2 id="dialog-title">You're on our list.</h2><span class="success-mark">✓</span><p>Thanks for booking with TM Detailers! We’ll contact you to confirm the appointment.</p><div class="booking-result"><strong>${esc(reply.reference)}</strong><p>Save this reference to check your booking status later.</p><a class="text-button" href="/track/?ref=${encodeURIComponent(reply.reference)}">Find this booking ↗</a></div><button class="button button-outline button-full" id="copy-booking-ref">Copy booking reference ↗</button>`);
   $('#copy-booking-ref').onclick=()=>navigator.clipboard?.writeText(reply.reference);
-  $('#booking-form').reset();$('#mobile-address').hidden=true;calcQuote();changeAlert($('#booking-alert'),'');
+  $('#booking-form').reset();$('#mobile-address').hidden=true;wizardStep=0;updateBookingWizard();calcQuote();changeAlert($('#booking-alert'),'');
  }catch(error){changeAlert($('#booking-alert'),error.message,true);}finally{button.disabled=!backendReady||!site.booking.enabled;}
 }
 const getPath=(root,path)=>String(path).split('.').reduce((o,k)=>o?.[k],root);
 function setPath(root,path,value){let parts=String(path).split('.'),cur=root;for(let i=0;i<parts.length-1;i++){cur=cur[parts[i]];}cur[parts.at(-1)]=value;}
 const inputField=(label,path,kind='text',opts={})=>{
  const value=getPath(draft,path);
- const inside=kind==='textarea'?`<textarea class="admin-textarea" data-path="${esc(path)}" rows="${opts.rows||3}">${esc(value??'')}</textarea>`:kind==='checkbox'?`<input type="checkbox" data-path="${esc(path)}" ${value?'checked':''}>`:kind==='color'?`<input class="admin-input admin-color" type="color" data-path="${esc(path)}" value="${esc(value)}">`:`<input class="admin-input" type="${kind}" data-path="${esc(path)}" value="${esc(value??'')}" ${kind==='number'?'min="0" max="10000" step="1"':''}>`;
+ const inside=kind==='textarea'?`<textarea class="admin-textarea" data-path="${esc(path)}" rows="${opts.rows||3}">${esc(value??'')}</textarea>`:kind==='checkbox'?`<input type="checkbox" data-path="${esc(path)}" ${value?'checked':''}>`:kind==='color'?`<input class="admin-input admin-color" type="color" data-path="${esc(path)}" value="${esc(/^#[0-9a-fA-F]{6}$/.test(value||'')?value:'#b9a27d')}">`:`<input class="admin-input" type="${kind}" data-path="${esc(path)}" value="${esc(value??'')}" ${kind==='number'?'min="0" max="10000" step="1"':''}>`;
  return `<label class="admin-field ${opts.full?'full':''}">${esc(label)}${inside}</label>`;
 };
 const saveBtn=()=>'<div class="admin-actions"><button class="admin-btn" data-admin-action="save-site">Save website changes ↗</button><span class="admin-note">Changes go live on your site after saving.</span></div>';
@@ -136,11 +141,11 @@ async function openAdmin(){
  await drawAdmin();
 }
 async function drawAdmin(){
- const names={overview:'Overview',content:'Site content',services:'Services',pricing:'Pricing',gallery:'Photo gallery',business:'Business accounts',bookings:'Bookings',settings:'Settings'};
+ const names={overview:'Owner overview',content:'Content & brand',services:'Your services',pricing:'Pricing studio',gallery:'Your photography',business:'Business accounts',bookings:'Booking operations',settings:'Seasonal design studio'};
  $('#admin-heading').textContent=names[activeTab]||'Overview';adminStatus('');
  const c=$('#admin-content');
  if(activeTab==='overview'){
-  c.innerHTML='<div class="admin-grid"><div class="admin-stat"><span>Total bookings</span><strong id="s-total">—</strong></div><div class="admin-stat"><span>Pending bookings</span><strong id="s-pending">—</strong></div><div class="admin-stat"><span>Confirmed</span><strong id="s-confirmed">—</strong></div><div class="admin-stat"><span>Active business accounts</span><strong id="s-business">—</strong></div></div><div class="admin-section"><div class="admin-card"><h3>Welcome to TM Studio.</h3><p>This is your control centre. Edit the public website in Site content, manage your photos in Photo gallery, set special business rates and codes in Business accounts, and review all booking requests in Bookings.</p><p><b>Important:</b> customer bookings are requests until you mark them confirmed.</p><button class="admin-btn secondary" data-switch-tab="bookings">View bookings ↗</button></div></div>';
+  c.innerHTML='<div class="admin-help"><strong>QUICK ACTIONS</strong> — Make the changes you need without searching through settings. <button class="admin-btn secondary" data-switch-tab="bookings">Open bookings ↗</button> <button class="admin-btn secondary" data-switch-tab="gallery">Manage photos ↗</button> <button class="admin-btn secondary" data-switch-tab="settings">Seasonal redesign ↗</button> <button class="admin-btn secondary" data-switch-tab="business">Business pricing ↗</button></div><div class="admin-grid"><div class="admin-stat"><span>Total bookings</span><strong id="s-total">—</strong></div><div class="admin-stat"><span>Pending bookings</span><strong id="s-pending">—</strong></div><div class="admin-stat"><span>Confirmed</span><strong id="s-confirmed">—</strong></div><div class="admin-stat"><span>Active business accounts</span><strong id="s-business">—</strong></div></div><div class="admin-section"><div class="admin-card"><h3>Welcome to TM Studio.</h3><p>This is your control centre. Edit the public website in Site content, manage your photos in Photo gallery, set special business rates and codes in Business accounts, and review all booking requests in Bookings.</p><p><b>Important:</b> customer bookings are requests until you mark them confirmed.</p><button class="admin-btn secondary" data-switch-tab="bookings">View bookings ↗</button></div></div>';
   try{const r=await api('admin/overview');for(const k of ['total','pending','confirmed'])$('#s-'+k).textContent=r.stats[k]||0;$('#s-business').textContent=r.stats.accounts||0;}catch(ex){adminStatus(ex.message,true);}
  } else if(activeTab==='content'){
   c.innerHTML=`<div class="admin-rows"><div class="admin-card"><h3>Hero · First impression</h3><div class="admin-fields">${inputField('Hero label','hero.eyebrow')}${inputField('Headline (use a period to split into two lines)','hero.title')}${inputField('Description','hero.description','textarea',{full:true})}${inputField('Hero photo URL (optional)','hero.image','text',{full:true})}</div><p>To use your own image, upload it below and it will become the hero image.</p><input type="file" accept="image/jpeg,image/png,image/webp" id="hero-upload-file"><button class="admin-btn secondary" data-admin-action="upload-hero">Upload hero image</button><div id="hero-upload-status" class="admin-note"></div></div>
@@ -154,7 +159,13 @@ async function drawAdmin(){
  } else if(activeTab==='gallery'){
   c.innerHTML=`<div class="admin-card"><h3>Your work, your photos.</h3><p>Upload real TM Detailers pictures from your device. They're stored in your Cloudflare database, then displayed on your public website after you save. Photos are compressed for faster loading.</p><div class="upload-zone"><input id="gallery-upload-file" type="file" accept="image/jpeg,image/png,image/webp" multiple><p>Choose JPG, PNG or WebP files. Up to 20 gallery photos total.</p><button class="admin-btn" data-admin-action="upload-gallery">Upload selected photos</button><p id="gallery-upload-status"></p></div></div><div class="admin-card"><h3>Gallery heading & introduction</h3><div class="admin-fields">${inputField('Gallery heading','galleryTitle')}${inputField('Gallery description','gallerySubtitle','textarea',{full:true})}</div></div><div class="admin-rows admin-section">${draft.gallery.map((g,i)=>`<div class="admin-entry"><div class="admin-entry-head"><strong>Photo ${i+1}</strong><button class="admin-btn danger" data-admin-action="remove-photo" data-index="${i}">Remove</button></div>${cleanURL(g.src,true)?`<img class="admin-photo-preview" src="${esc(g.src)}" alt="">`:''}<div class="admin-photo-control"><button class="admin-btn secondary" data-admin-action="move-photo-up" data-index="${i}" ${i===0?'disabled':''}>↑ Move up</button><button class="admin-btn secondary" data-admin-action="move-photo-down" data-index="${i}" ${i===draft.gallery.length-1?'disabled':''}>↓ Move down</button></div><div class="admin-fields">${inputField('Photo URL',`gallery.${i}.src`,'text',{full:true})}${inputField('Caption',`gallery.${i}.caption`)}${inputField('Alt text / accessibility',`gallery.${i}.alt`)}${inputField('Photo link (optional)',`gallery.${i}.link`,'text',{full:true})}</div></div>`).join('')}</div><div class="admin-actions"><button class="admin-btn secondary" data-admin-action="add-url-photo">+ Add photo by URL</button></div>${saveBtn()}`;
  } else if(activeTab==='settings'){
-  c.innerHTML=`<div class="admin-card"><h3>Appearance</h3><p>Luxury graphite and steel-blue by default. Select a seasonal accent when running a holiday campaign.</p><label class="admin-field">Seasonal style<select data-path="theme" class="admin-input">${[['default','Everyday luxury'],['eid','Eid'],['thanksgiving','Thanksgiving'],['christmas','Christmas'],['halloween','Halloween'],['newyear','New Year']].map(([v,t])=>`<option value="${v}" ${draft.theme===v?'selected':''}>${t}</option>`).join('')}</select></label>${inputField('Accent colour (everyday)','accent','color')}</div><div class="admin-card admin-section"><h3>Booking settings</h3><label class="admin-switch"><input type="checkbox" data-path="booking.enabled" ${draft.booking.enabled?'checked':''}> Accept online booking requests</label><div class="admin-fields" style="margin-top:18px">${inputField('Maximum bookings per day','booking.maxPerDay','number')}${inputField('Customer booking note','booking.notice','textarea',{full:true})}</div><label class="admin-field">Blocked dates (YYYY-MM-DD, comma-separated)<input class="admin-input" id="blocked-editor" value="${esc((draft.booking.blockedDates||[]).join(', '))}" placeholder="2026-12-25, 2026-12-26"></label><label class="admin-field">Available time slots (24-hour, comma-separated)<input class="admin-input" id="slot-editor" value="${esc(draft.booking.timeSlots.join(', '))}"></label></div><div class="admin-card admin-section"><h3>Homepage sections</h3><div class="admin-fields">${Object.keys(draft.sections).map(x=>`<label class="admin-switch"><input type="checkbox" data-path="sections.${x}" ${draft.sections[x]?'checked':''}> ${esc(titleCase(x))}</label>`).join('')}</div></div><div class="admin-help admin-section">The owner password and database connection are intentionally managed through Cloudflare secrets, not through this public-facing interface. Business codes are created in Business accounts.</div>${saveBtn()}`;
+  const themes=[['default','Signature atelier','Graphite · warm metal'],['eid','Eid edition','Emerald · moonlight · gold'],['thanksgiving','Thanksgiving','Copper · amber · walnut'],['christmas','Winter holidays','Burgundy · evergreen'],['halloween','Halloween','Aubergine · ember'],['newyear','New Year','Midnight blue · silver']];
+  const current=draft.theme||'default';const path='themeProfiles.'+current;
+  c.innerHTML=`<div class="admin-help"><strong>SEASONAL DESIGN STUDIO</strong> — Switch the full site's backgrounds, hero treatment, typography accents, panels, booking and footer. Then customize the campaign headline, image and the prices customers will actually be quoted. Click Save to publish.</div>
+  <div class="theme-studio-grid">${themes.map(([id,name,caption])=>`<button type="button" data-theme-choice="${id}" class="theme-option ${current===id?'selected':''}" data-style="${id}"><span>${esc(caption)}</span><strong>${esc(name)}</strong><span>${current===id?'● ACTIVE DESIGN':'↗ SELECT DESIGN'}</span></button>`).join('')}</div>
+  <div class="admin-card admin-section"><h3>${esc(themes.find(t=>t[0]===current)[1])} / Campaign editor</h3><p>Leave the fields empty to use the standard website copy and prices. To change an individual vehicle price for this holiday, enter a rate below.</p><div class="admin-fields">${inputField('Holiday greeting (e.g. Eid Mubarak)',path+'.greeting','text',{full:true})}${inputField('Holiday headline',path+'.headline','text',{full:true})}${inputField('Holiday description',path+'.description','textarea',{full:true})}${inputField('Holiday hero image URL',path+'.heroImage','text',{full:true})}${inputField('Seasonal highlight colour',path+'.accent','color')}${inputField('Seasonal background colour',path+'.background','color')}</div><div class="theme-editor-note">The layout and entire site palette change with the theme. The campaign image overrides the standard hero photo; you can upload your own photograph in Site content and paste its URL here.</div><h3>Season-specific public prices</h3><div class="theme-rate-grid">${draft.vehicles.map(v=>inputField(v.name+' (CAD) — default '+money(v.price),path+'.prices.'+v.id,'number')).join('')}</div></div>
+  <div class="admin-card admin-section"><h3>Booking operations</h3><label class="admin-switch"><input type="checkbox" data-path="booking.enabled" ${draft.booking.enabled?'checked':''}> Accept online booking requests</label><div class="admin-fields" style="margin-top:18px">${inputField('Maximum bookings per day','booking.maxPerDay','number')}${inputField('Customer booking note','booking.notice','textarea',{full:true})}</div><label class="admin-field">Blocked dates (YYYY-MM-DD, comma-separated)<input class="admin-input" id="blocked-editor" value="${esc((draft.booking.blockedDates||[]).join(', '))}" placeholder="2026-12-25, 2026-12-26"></label><label class="admin-field">Available time slots (24-hour, comma-separated)<input class="admin-input" id="slot-editor" value="${esc(draft.booking.timeSlots.join(', '))}"></label></div>
+  <div class="admin-card admin-section"><h3>Homepage sections</h3><div class="admin-fields">${Object.keys(draft.sections).map(x=>`<label class="admin-switch"><input type="checkbox" data-path="sections.${x}" ${draft.sections[x]?'checked':''}> ${esc(titleCase(x))}</label>`).join('')}</div></div><div class="admin-help admin-section">The owner password, security key, and D1 database stay in Cloudflare. Customer booking details and company access codes are never stored in public website source.</div>${saveBtn()}`;
  } else if(activeTab==='business'){
   c.innerHTML=`<div class="admin-help">Each company gets its own login code and can have its own rates. Codes are shown only once when created; share them privately with your client. Disable an account any time.</div><div class="admin-card admin-section"><h3>Create a business account</h3><div class="admin-fields"><label class="admin-field">Company or client name<input id="new-business-name" class="admin-input" placeholder="e.g. Corporate Fleet Client"></label><label class="admin-field">Custom access code (optional)<input id="new-business-code" class="admin-input" placeholder="TM-BIZ976112" maxlength="60" autocomplete="off"></label></div><div class="admin-fields" style="margin-top:17px">${draft.vehicles.map(v=>`<label class="admin-field">${esc(v.name)} rate (CAD)<input class="admin-input" type="number" min="0" max="10000" id="new-price-${esc(v.id)}" value="${esc(draft.businessPrices[v.id])}"></label>`).join('')}</div><div class="admin-actions"><button class="admin-btn" data-admin-action="create-business">Create private account + code ↗</button></div><div id="new-business-result"></div></div><div id="business-accounts" class="admin-rows admin-section"></div>`;
   await drawBusiness();
@@ -191,6 +202,7 @@ async function uploadImage(file){
 }
 async function handleAdminClick(e){
  const tab=e.target.closest('[data-switch-tab]');if(tab){switchAdmin(tab.dataset.switchTab);return;}
+ const themeButton=e.target.closest('[data-theme-choice]');if(themeButton){draft.theme=themeButton.dataset.themeChoice;drawAdmin();return;}
  const button=e.target.closest('[data-admin-action]');if(!button)return;
  const action=button.dataset.adminAction;
  try{
@@ -239,16 +251,45 @@ async function handleAdminClick(e){
 function switchAdmin(tab){activeTab=tab;document.querySelectorAll('.admin-sidebar button').forEach(x=>x.classList.toggle('active',x.dataset.tab===tab));$('#admin-main')?.scrollTo?.(0,0);drawAdmin();}
 function onEdit(e){
  const el=e.target;if(!el.dataset.path||!draft)return;
- let val=el.type==='checkbox'?el.checked:el.type==='number'?Number(el.value):el.value;
+ let val=el.type==='checkbox'?el.checked:el.type==='number'?(el.value===''?'':Number(el.value)):el.value;
  setPath(draft,el.dataset.path,val);
 }
+let wizardStep=0;
+function updateBookingWizard(){
+ const pages=[...document.querySelectorAll('.booking-wizard-page')];
+ pages.forEach((node,i)=>{node.hidden=i!==wizardStep;});
+ document.querySelectorAll('[data-booking-step]').forEach((node,i)=>node.classList.toggle('active',i===wizardStep));
+ const prev=$('#booking-prev'),next=$('#booking-next');if(prev)prev.hidden=wizardStep===0;if(next)next.hidden=wizardStep===3;
+ const header=$('#booking-wizard-index');if(header)header.textContent=String(wizardStep+1).padStart(2,'0')+' / 04';
+}
+function setupBookingWizard(){
+ const form=$('#booking-form');if(!form||form.querySelector('.booking-wizard-navigation'))return;
+ const grid=form.querySelector('.form-grid'),labels=[...grid.querySelectorAll(':scope > label')];
+ const steps=['Your details','Vehicle & date','Service location','Review'];
+ const nav=document.createElement('div');nav.className='booking-wizard-navigation';nav.innerHTML=steps.map((x,i)=>`<button type="button" data-booking-step="${i}"><span>0${i+1}</span>${x}</button>`).join('');
+ form.querySelector('.form-top').after(nav);
+ const pages=steps.map((x,i)=>{const section=document.createElement('div');section.className='booking-wizard-page';section.dataset.wizardStep=String(i);section.innerHTML=`<div class="wizard-title"><span>STEP 0${i+1}</span><h3>${x}</h3></div>`;nav.after(section);return section;});
+ const first=document.createElement('div');first.className='form-grid';labels.slice(0,3).forEach(el=>first.append(el));pages[0].append(first);
+ const second=document.createElement('div');second.className='form-grid';labels.slice(3).forEach(el=>second.append(el));pages[1].append(second);grid.remove();
+ for(const sel of ['.location-fieldset','#mobile-address','label:has(#book-notes)']){let node=form.querySelector(sel);if(node)pages[2].append(node);}
+ for(const sel of ['.quote-line','.form-disclaimer','#book-submit']){let node=form.querySelector(sel);if(node)pages[3].append(node);}
+ const footer=document.createElement('div');footer.className='wizard-controls';footer.innerHTML='<button type="button" class="button button-outline" id="booking-prev">← Back</button><span id="booking-wizard-index">01 / 04</span><button type="button" class="button button-solid" id="booking-next">Continue ↗</button>';form.append(footer);
+ $('#booking-prev').addEventListener('click',()=>{wizardStep=Math.max(0,wizardStep-1);updateBookingWizard();});
+ $('#booking-next').addEventListener('click',()=>{
+  const visible=pages[wizardStep];for(const el of visible.querySelectorAll('input,select,textarea')){if(!el.checkValidity()){el.reportValidity();return;}}
+  wizardStep=Math.min(3,wizardStep+1);updateBookingWizard();
+ });
+ document.querySelectorAll('[data-booking-step]').forEach(btn=>btn.addEventListener('click',()=>{const target=Number(btn.dataset.bookingStep);if(target<wizardStep){wizardStep=target;updateBookingWizard();}}));
+ updateBookingWizard();
+}
 function bindEvents(){
+ setupBookingWizard();
  $('#year').textContent=new Date().getFullYear();
  document.querySelectorAll('[data-action="admin"]').forEach(e=>e.addEventListener('click',()=>{if(session?.role==='admin')openAdmin();else authDialog('admin');}));
  document.body.addEventListener('click',e=>{
   const action=e.target.closest('[data-action]')?.dataset.action;
-  if(action==='business'){if(session?.role==='business')document.querySelector('#pricing').scrollIntoView({behavior:'smooth'});else authDialog('business');}
-  if(action==='lookup')lookupDialog();
+  if(action==='business'){window.location.assign('/business/');}
+  if(action==='lookup')window.location.assign('/track/');
   if(action==='logout')logout();
   const chosen=e.target.closest('[data-vehicle]');if(chosen){$('#book-vehicle').value=chosen.dataset.vehicle;calcQuote();}
  });
@@ -277,8 +318,9 @@ async function init(){
  bindEvents();
  const date=new Date().toLocaleDateString('en-CA',{timeZone:'America/Toronto'});$('#book-date').min=date;
  const maxDate=new Date(Date.now()+120*86400000).toLocaleDateString('en-CA',{timeZone:'America/Toronto'});$('#book-date').max=maxDate;
- try{const [settings,auth]=await Promise.all([api('site'),api('session')]);site=settings.site;session=auth.role?{role:auth.role,label:auth.label,prices:auth.prices}:null;backendReady=true;}catch(ex){console.info('TM Studio: Backend not yet configured. Public preview uses default content.',ex.message);backendReady=false;}
+ try{await send('logout',{});const settings=await api('site');site=settings.site;session=null;backendReady=true;}catch(ex){console.info('TM Studio: Backend not yet configured. Public preview uses default content.',ex.message);backendReady=false;}
  renderSite();
- if(session?.role==='business')renderSite();
+ // Owner and business sessions intentionally end on navigation or refresh.
+ if(location.pathname.startsWith('/studio/') && new URLSearchParams(location.search).has('admin')) authDialog('admin');
 }
 init();
