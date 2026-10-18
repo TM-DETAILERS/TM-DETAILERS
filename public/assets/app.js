@@ -170,7 +170,7 @@ async function drawAdmin(){
   c.innerHTML=`<div class="admin-help">Each company gets its own login code and can have its own rates. Codes are shown only once when created; share them privately with your client. Disable an account any time.</div><div class="admin-card admin-section"><h3>Create a business account</h3><div class="admin-fields"><label class="admin-field">Company or client name<input id="new-business-name" class="admin-input" placeholder="e.g. Corporate Fleet Client"></label><label class="admin-field">Custom access code (optional)<input id="new-business-code" class="admin-input" placeholder="TM-BIZ976112" maxlength="60" autocomplete="off"></label></div><div class="admin-fields" style="margin-top:17px">${draft.vehicles.map(v=>`<label class="admin-field">${esc(v.name)} rate (CAD)<input class="admin-input" type="number" min="0" max="10000" id="new-price-${esc(v.id)}" value="${esc(draft.businessPrices[v.id])}"></label>`).join('')}</div><div class="admin-actions"><button class="admin-btn" data-admin-action="create-business">Create private account + code ↗</button></div><div id="new-business-result"></div></div><div id="business-accounts" class="admin-rows admin-section"></div>`;
   await drawBusiness();
  } else if(activeTab==='bookings'){
-  c.innerHTML='<div class="admin-help">Incoming appointments are requests. Review customer details and change their status here; contact customers directly to confirm.</div><div class="admin-section"><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Reference / customer</th><th>Contact</th><th>Vehicle</th><th>Date / time</th><th>Details</th><th>Price</th><th>Status</th></tr></thead><tbody id="bookings-table"><tr><td colspan="7">Loading...</td></tr></tbody></table></div></div>';
+  c.innerHTML='<div class="admin-help">Incoming appointments are requests. Review customer details and change their status here; contact customers directly to confirm.</div><div class="admin-section"><div class="admin-table-wrap"><table class="admin-table"><thead><tr><th>Reference / customer</th><th>Contact</th><th>Vehicle</th><th>Date / time</th><th>Details</th><th>Price</th><th>Status</th><th>Actions</th></tr></thead><tbody id="bookings-table"><tr><td colspan="8">Loading...</td></tr></tbody></table></div></div>';
   await drawBookings();
  }
 }
@@ -183,8 +183,26 @@ async function drawBusiness(){
 }
 async function drawBookings(){
  try{const r=await api('admin/bookings');bookings=r.bookings;
-  $('#bookings-table').innerHTML=bookings.length?bookings.map(b=>`<tr><td><strong>${esc(b.reference)}</strong><br>${esc(b.customer_name)} ${b.business_account_id?'<br><small>Business account</small>':''}</td><td>${esc(b.phone)}<br><small>${esc(b.email)}</small></td><td>${esc(site.vehicles.find(v=>v.id===b.vehicle)?.name||b.vehicle)}</td><td>${esc(b.appointment_date)}<br><small>${esc(formatTime(b.appointment_time))}</small></td><td>${esc(b.service_location)} ${b.address?'<br><small>'+esc(b.address)+'</small>':''}${b.notes?'<br><small>'+esc(b.notes)+'</small>':''}</td><td>${money(b.quoted_price)}</td><td><select data-booking-id="${esc(b.id)}">${['pending','confirmed','completed','cancelled'].map(s=>`<option value="${s}" ${b.status===s?'selected':''}>${titleCase(s)}</option>`).join('')}</select></td></tr>`).join(''):'<tr><td colspan="7" class="admin-empty">No bookings yet.</td></tr>';
- }catch(ex){$('#bookings-table').innerHTML='<tr><td colspan="7">'+esc(ex.message)+'</td></tr>';}
+  $('#bookings-table').innerHTML=bookings.length?bookings.map(b=>`<tr><td><strong>${esc(b.reference)}</strong><br>${esc(b.customer_name)} ${b.business_account_id?'<br><small>Business account</small>':''}</td><td>${esc(b.phone)}<br><small>${esc(b.email)}</small></td><td>${esc(site.vehicles.find(v=>v.id===b.vehicle)?.name||b.vehicle)}</td><td>${esc(b.appointment_date)}<br><small>${esc(formatTime(b.appointment_time))}</small></td><td>${esc(b.service_location)} ${b.address?'<br><small>'+esc(b.address)+'</small>':''}${b.notes?'<br><small>'+esc(b.notes)+'</small>':''}</td><td>${money(b.quoted_price)}</td><td><select data-booking-id="${esc(b.id)}">${['pending','confirmed','completed','cancelled'].map(s=>`<option value="${s}" ${b.status===s?'selected':''}>${titleCase(s)}</option>`).join('')}</select></td><td><button type="button" class="admin-btn danger delete-booking-button" data-admin-action="delete-booking" data-id="${esc(b.id)}" aria-label="Delete booking ${esc(b.reference)}">Delete</button></td></tr>`).join(''):'<tr><td colspan="8" class="admin-empty">No bookings yet.</td></tr>';
+ }catch(ex){$('#bookings-table').innerHTML='<tr><td colspan="8">'+esc(ex.message)+'</td></tr>';}
+}
+function confirmBookingDeletion(id){
+ const booking=bookings.find(b=>b.id===id);
+ if(!booking){adminStatus('Booking not found. Refresh the list.',true);return;}
+ const ref=booking.reference;
+ openDialog(`<div class="dialog-eyebrow">OWNER STUDIO / PERMANENT ACTION</div><h2 id="dialog-title">Delete this booking?</h2><p><strong>${esc(ref)}</strong> — ${esc(booking.customer_name)}.</p><p>This permanently removes the booking from the database and disables customer reference lookup. This cannot be undone in Owner Studio. Only delete records you no longer need.</p><form id="delete-booking-form"><label for="delete-booking-ref">Type <strong>${esc(ref)}</strong> to confirm<input id="delete-booking-ref" name="reference" required autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="${esc(ref)}"></label><div id="delete-booking-alert" class="inline-alert" role="status" hidden></div><div class="admin-actions"><button type="button" class="admin-btn secondary" id="cancel-booking-delete">Keep booking</button><button type="submit" class="admin-btn danger" id="confirm-booking-delete" disabled>Delete permanently</button></div></form>`);
+ const input=$('#delete-booking-ref'),submit=$('#confirm-booking-delete');
+ input.addEventListener('input',()=>{submit.disabled=input.value.trim().toUpperCase()!==ref;});
+ $('#cancel-booking-delete').addEventListener('click',closeDialog);
+ $('#delete-booking-form').addEventListener('submit',async e=>{
+  e.preventDefault();if(input.value.trim().toUpperCase()!==ref)return;
+  submit.disabled=true;submit.textContent='Deleting…';
+  try{
+   await send('admin/bookings/'+encodeURIComponent(id),{reference:ref},'DELETE');
+   closeDialog();await drawBookings();adminStatus('Booking '+ref+' permanently deleted ✓');
+  }catch(ex){changeAlert($('#delete-booking-alert'),ex.message,true);submit.textContent='Delete permanently';submit.disabled=false;}
+ });
+ input.focus();
 }
 function resizeImage(file){return new Promise((resolve,reject)=>{
  const img=new Image(),url=URL.createObjectURL(file);
@@ -206,6 +224,9 @@ async function handleAdminClick(e){
  const button=e.target.closest('[data-admin-action]');if(!button)return;
  const action=button.dataset.adminAction;
  try{
+  if(action==='delete-booking'){
+   confirmBookingDeletion(button.dataset.id);return;
+  }
   if(action==='save-site'){
    if(activeTab==='settings'){draft.booking.timeSlots=($('#slot-editor')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);draft.booking.blockedDates=($('#blocked-editor')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);}
    button.disabled=true;const result=await send('admin/site',{site:draft},'PUT');site=result.site;draft=copyObj(site);renderSite();adminStatus('Saved and published ✓');button.disabled=false;return;

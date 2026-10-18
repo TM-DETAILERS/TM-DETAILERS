@@ -245,6 +245,15 @@ export async function onRequest({request,env}){
    await env.DB.prepare('UPDATE bookings SET status=? WHERE id=?').bind(b.status,id).run();
    return json({ok:true});
   }
+  if(method==='DELETE'&&/^admin\/bookings\/[0-9a-f-]{36}$/.test(path)){
+   const id=path.split('/')[2],body=await readBody(request);
+   const reference=text(body?.reference,40).toUpperCase();
+   if(!/^TM-[A-Z0-9]{8}$/.test(reference))return err('Confirm the booking reference to delete this booking.');
+   // Match both the internal ID and the owner-confirmed reference to prevent deleting a different row.
+   const deleted=await env.DB.prepare('DELETE FROM bookings WHERE id=? AND reference=?').bind(id,reference).run();
+   if(!deleted.meta?.changes)return err('Booking not found or reference did not match. Refresh the booking list.',404);
+   return json({ok:true,message:'Booking permanently deleted.'});
+  }
   return err('Not found',404);
  }catch(e){console.error(e);return err('Server error. Check your Cloudflare deployment and D1 database.',500);}
 }
