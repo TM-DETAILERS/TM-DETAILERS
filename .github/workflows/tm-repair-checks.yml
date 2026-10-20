@@ -24,4 +24,4 @@ jobs:
       - name: Check pages, imports and syntax
         run: node tests/recovery-audit.mjs static
       - name: Exercise isolated SQLite booking API
-        run: node --experimental-default-type=module tests/recovery-audit.mjs api
+        run: node tests/recovery-audit.mjs api
