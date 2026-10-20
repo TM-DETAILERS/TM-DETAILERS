@@ -145,9 +145,74 @@ async function calendar(env,sess,c){
  }
  return {ok:true,dates,first,last,windowDays:days};
 }
-const result=async (statement) => {try{return await statement;}catch(e){console.error('D1 error',e);throw e;}};
+// Database readiness checks never read or expose customer records.
+const REQUIRED_TABLES=['site_settings','business_accounts','bookings','media','auth_attempts','booking_requests','fleet_departments','fleet_vehicles','booking_public_details','booking_photos'];
+const BOOKING_ADDITIONS=['fleet_vehicle_id','department_id'];
+const DDL=[
+ `CREATE TABLE IF NOT EXISTS site_settings (id INTEGER PRIMARY KEY CHECK(id=1),config_json TEXT NOT NULL,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+ `CREATE TABLE IF NOT EXISTS business_accounts (id TEXT PRIMARY KEY,label TEXT NOT NULL,code_hash TEXT NOT NULL UNIQUE,pricing_json TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+ `CREATE TABLE IF NOT EXISTS bookings (id TEXT PRIMARY KEY,reference TEXT NOT NULL UNIQUE,customer_name TEXT NOT NULL,email TEXT NOT NULL,phone TEXT NOT NULL,service_location TEXT NOT NULL,address TEXT,vehicle TEXT NOT NULL,appointment_date TEXT NOT NULL,appointment_time TEXT NOT NULL,notes TEXT,quoted_price INTEGER NOT NULL,business_account_id TEXT,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(business_account_id) REFERENCES business_accounts(id))`,
+ `CREATE TABLE IF NOT EXISTS media (id TEXT PRIMARY KEY,mime TEXT NOT NULL,data BLOB NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+ `CREATE TABLE IF NOT EXISTS auth_attempts (id INTEGER PRIMARY KEY AUTOINCREMENT,client_key TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`,
+ `CREATE TABLE IF NOT EXISTS booking_requests (id TEXT PRIMARY KEY,booking_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('cancel','reschedule')),message TEXT NOT NULL DEFAULT '',status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','approved','declined')),created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,reviewed_at TEXT,FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`,
+ `CREATE TABLE IF NOT EXISTS fleet_departments (id TEXT PRIMARY KEY,business_account_id TEXT NOT NULL,name TEXT NOT NULL,FOREIGN KEY(business_account_id) REFERENCES business_accounts(id) ON DELETE CASCADE)`,
+ `CREATE TABLE IF NOT EXISTS fleet_vehicles (id TEXT PRIMARY KEY,business_account_id TEXT NOT NULL,department_id TEXT,vehicle TEXT NOT NULL,make TEXT NOT NULL,model TEXT NOT NULL,model_year INTEGER,label TEXT NOT NULL DEFAULT '',active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(business_account_id) REFERENCES business_accounts(id) ON DELETE CASCADE,FOREIGN KEY(department_id) REFERENCES fleet_departments(id) ON DELETE SET NULL)`,
+ `CREATE TABLE IF NOT EXISTS booking_public_details (booking_id TEXT PRIMARY KEY,headline TEXT NOT NULL DEFAULT '',status_message TEXT NOT NULL DEFAULT '',next_step TEXT NOT NULL DEFAULT '',eta_text TEXT NOT NULL DEFAULT '',updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`,
+ `CREATE TABLE IF NOT EXISTS booking_photos (id TEXT PRIMARY KEY,booking_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('before','after')),caption TEXT NOT NULL DEFAULT '',mime TEXT NOT NULL,data BLOB NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,FOREIGN KEY(booking_id) REFERENCES bookings(id) ON DELETE CASCADE)`
+];
+const DDL_INDEXES=[
+ `CREATE INDEX IF NOT EXISTS idx_bookings_appointment ON bookings(appointment_date,status)`,
+ `CREATE INDEX IF NOT EXISTS idx_bookings_email ON bookings(reference,email)`,
+ `CREATE INDEX IF NOT EXISTS idx_auth_attempts_key_time ON auth_attempts(client_key,created_at)`,
+ `CREATE INDEX IF NOT EXISTS idx_booking_requests_status ON booking_requests(status,created_at)`,
+ `CREATE INDEX IF NOT EXISTS idx_fleet_owner ON fleet_vehicles(business_account_id,active)`,
+ `CREATE INDEX IF NOT EXISTS idx_booking_photos_booking ON booking_photos(booking_id,kind)`
+];
+async function schemaStatus(env){
+ const {results:tableRows=[]}=await env.DB.prepare("SELECT name FROM sqlite_master WHERE type='table'").all();
+ const tables=new Set(tableRows.map(r=>r.name));
+ const missingTables=REQUIRED_TABLES.filter(t=>!tables.has(t));
+ const missingColumns=[];
+ if(tables.has('bookings')){
+   const {results:cols=[]}=await env.DB.prepare('PRAGMA table_info(bookings)').all();
+   const has=new Set(cols.map(c=>c.name));
+   for(const col of BOOKING_ADDITIONS)if(!has.has(col))missingColumns.push('bookings.'+col);
+ }
+ return {ready:missingTables.length===0&&missingColumns.length===0,missingTables,missingColumns};
+}
+async function repairSchema(env){
+ // Additive, repeatable schema repair. Never drops tables or modifies customer rows.
+ const before=await schemaStatus(env);
+ for(const sql of DDL) await env.DB.prepare(sql).run();
+ const columns=await env.DB.prepare('PRAGMA table_info(bookings)').all();
+ const has=new Set((columns.results||[]).map(c=>c.name));
+ for(const column of BOOKING_ADDITIONS){
+   if(!has.has(column)){
+     try{await env.DB.prepare(`ALTER TABLE bookings ADD COLUMN ${column} TEXT`).run();}
+     catch(e){const rows=await env.DB.prepare('PRAGMA table_info(bookings)').all();if(!(rows.results||[]).some(x=>x.name===column))throw e;}
+   }
+ }
+ for(const sql of DDL_INDEXES)await env.DB.prepare(sql).run();
+ return {before,after:await schemaStatus(env)};
+}
+function publicError(e){
+ const m=String(e?.message||'');
+ if(/UNIQUE constraint failed: business_accounts\.code_hash|business_accounts\.code_hash.*UNIQUE/i.test(m))return ['That business access code is already registered. Open the existing company or choose another code.',409,'CODE_IN_USE'];
+ if(/no such table|no such column|has no column named|table .* has no column named/i.test(m))return ['The database structure is incomplete. Owner: open Owner Studio → Repair database.',503,'DB_SCHEMA_INCOMPLETE'];
+ if(/FOREIGN KEY constraint failed/i.test(m))return ['An associated record was not found. Refresh and try again.',409,'INVALID_RELATION'];
+ if(/UNIQUE constraint failed: bookings\.reference/i.test(m))return ['Please try submitting your booking again.',409,'REFERENCE_COLLISION'];
+ return null;
+}
+
 export async function onRequest({request,env,waitUntil}){
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/?/,'').replace(/\/$/,'');
+ if(request.method==='GET'&&path==='health'){
+  const response={ok:true,version:'V6.2',api:'online',database:env.DB?'bound':'missing',security:(Boolean(env.SESSION_SECRET&&env.SESSION_SECRET.length>=32&&env.ADMIN_PASSWORD&&env.ADMIN_PASSWORD.length>=12)?'configured':'incomplete'),schema:'unknown'};
+  if(env.DB)try{const status=await schemaStatus(env);response.schema=status.ready?'ready':'needs_repair';}catch(e){console.error('Health check database failed',e);response.schema='unavailable';}
+  response.ok=response.database==='bound'&&response.security==='configured'&&response.schema==='ready';
+  return json(response,response.ok?200:503);
+ }
+
  if(!env.DB)return err('Database not configured yet. See SETUP.md.',503);
  if(!env.SESSION_SECRET||env.SESSION_SECRET.length<32||!env.ADMIN_PASSWORD||env.ADMIN_PASSWORD.length<12)return err('Site security setup incomplete. See SETUP.md.',503);
  const method=request.method;
@@ -172,7 +237,15 @@ export async function onRequest({request,env,waitUntil}){
   if(method==='POST'&&path==='login'){
    const ip=request.headers.get('CF-Connecting-IP')||'unknown';
    const clientKey=await codeHash('login:'+ip,env);
-   const attempt=await env.DB.prepare("SELECT COUNT(*) AS n FROM auth_attempts WHERE client_key=? AND created_at>datetime('now','-15 minutes')").bind(clientKey).first();
+   let attempt;
+   try{attempt=await env.DB.prepare("SELECT COUNT(*) AS n FROM auth_attempts WHERE client_key=? AND created_at>datetime('now','-15 minutes')").bind(clientKey).first();}
+   catch(e){
+    if(!/no such table: auth_attempts/i.test(String(e.message)))throw e;
+    // A legacy/empty D1 database can still authenticate its owner to run the explicit repair.
+    await env.DB.prepare(DDL[4]).run();
+    await env.DB.prepare(DDL_INDEXES[2]).run();
+    attempt={n:0};
+   }
    if(Number(attempt?.n||0)>=12)return err('Too many login attempts. Try again in 15 minutes.',429);
    const b=await readBody(request);if(!b)return err('Invalid request');
    const kind=b.kind==='admin'?'admin':'business';
@@ -293,6 +366,12 @@ export async function onRequest({request,env,waitUntil}){
   }
   const sess=await readSession(request,env);
   if(!path.startsWith('admin/')||sess?.role!=='admin')return err('Not authorized',401);
+  if(method==='GET'&&path==='admin/diagnostics')return json({ok:true,...await schemaStatus(env)});
+  if(method==='POST'&&path==='admin/repair-database'){
+   const state=await repairSchema(env);
+   return json({ok:state.after.ready, ...state, note:'Additive changes only. Existing bookings and company records were not deleted.'},state.after.ready?200:503);
+  }
+
   if(method==='GET'&&path==='admin/track'){
    const ref=text(url.searchParams.get('reference'),40).toUpperCase();if(!bookingRefOK(ref))return err('Enter a booking reference');
    const booking=await env.DB.prepare('SELECT * FROM bookings WHERE reference=?').bind(ref).first();
@@ -354,8 +433,12 @@ export async function onRequest({request,env,waitUntil}){
    const custom=text(b.code,60).toUpperCase();
    if(custom&&!/^TM-[A-Z0-9-]{7,56}$/.test(custom))return err('Custom codes must start with TM- and use at least 7 more letters, numbers or hyphens');
    const code=custom||'TM-BIZ-'+b64url(crypto.getRandomValues(new Uint8Array(12))).replace(/[^A-Z0-9]/gi,'').slice(0,15).toUpperCase();
-   const id=crypto.randomUUID();
-   await env.DB.prepare('INSERT INTO business_accounts (id,label,code_hash,pricing_json) VALUES (?,?,?,?)').bind(id,label,await codeHash(code,env),JSON.stringify(prices)).run();
+   const id=crypto.randomUUID(),hashedCode=await codeHash(code,env);
+   const existing=await env.DB.prepare('SELECT id FROM business_accounts WHERE code_hash=?').bind(hashedCode).first();
+   if(existing)return err('This access code already belongs to a business account. Find that company in the list, or choose another code.',409);
+   try{await env.DB.prepare('INSERT INTO business_accounts (id,label,code_hash,pricing_json) VALUES (?,?,?,?)').bind(id,label,hashedCode,JSON.stringify(prices)).run();}
+   catch(e){if(/UNIQUE constraint failed/.test(String(e.message)))return err('Access code already exists. Choose another code.',409);throw e;}
+
    return json({ok:true,id,code},201);
   }
   if(method==='POST'&&/^admin\/business\/[0-9a-f-]{36}\/rotate$/.test(path)){
@@ -417,5 +500,10 @@ export async function onRequest({request,env,waitUntil}){
    return json({ok:true,message:'Booking permanently deleted.'});
   }
   return err('Not found',404);
- }catch(e){console.error(e);return err('Server error. Check your Cloudflare deployment and D1 database.',500);}
+ }catch(e){
+  const known=publicError(e);if(known){console.error('TM API structured error',known[2],e);return json({ok:false,error:known[0],code:known[2]},known[1]);}
+  const incident=crypto.randomUUID().slice(0,8).toUpperCase();
+  console.error('TM API failure',incident,method,path,e);
+  return json({ok:false,error:'Server error. Cloudflare logs will show incident '+incident+'.',code:'SERVER_FAILURE',incident},500);
+ }
 }

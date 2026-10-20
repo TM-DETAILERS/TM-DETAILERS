@@ -1,1 +1,2 @@
-TM DETAILERS - TRACKER & OWNER PHOTOS UPGRADE V6.1 - 2026-10-19
+TM DETAILERS — API & SCHEMA REPAIR V6.2
+Fixes duplicate company access code and adds owner-safe schema check/repair.
