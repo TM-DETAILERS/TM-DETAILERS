@@ -48,9 +48,27 @@ async function readBody(req){
  try{return await req.json();}catch{return null;}
 }
 async function site(env){
+ const base=structuredClone(DEFAULT_SITE);
  const r=await env.DB.prepare('SELECT config_json FROM site_settings WHERE id=1').first();
- if(!r)return structuredClone(DEFAULT_SITE);
- try{return {...structuredClone(DEFAULT_SITE),...JSON.parse(r.config_json)};}catch{return structuredClone(DEFAULT_SITE);}
+ if(!r)return base;
+ try{
+ const saved=JSON.parse(r.config_json);
+ if(!saved||typeof saved!=='object'||Array.isArray(saved))return base;
+ const merged={...base,...saved};
+ for(const field of ['hero','contact','about','announcement','booking','sections','businessPrices']){
+ const value=saved[field];
+ merged[field]=value&&typeof value==='object'&&!Array.isArray(value)?{...base[field],...value}:base[field];
+ }
+ if(!Array.isArray(merged.booking.timeSlots)||!merged.booking.timeSlots.length)merged.booking.timeSlots=base.booking.timeSlots;
+ if(!Array.isArray(merged.booking.blockedDates))merged.booking.blockedDates=[];
+ if(!Number.isFinite(Number(merged.booking.maxPerDay))||Number(merged.booking.maxPerDay)<1)merged.booking.maxPerDay=base.booking.maxPerDay;
+ if(!Array.isArray(merged.vehicles)||!merged.vehicles.length)merged.vehicles=base.vehicles;
+ if(!Array.isArray(merged.services))merged.services=base.services;
+ if(!Array.isArray(merged.gallery))merged.gallery=base.gallery;
+ const themes=saved.themeProfiles&&typeof saved.themeProfiles==='object'?saved.themeProfiles:{};
+ merged.themeProfiles=Object.fromEntries(Object.entries(base.themeProfiles).map(([id,defaults])=>[id,{...defaults,...(themes[id]&&typeof themes[id]==='object'?themes[id]:{}),prices:{...defaults.prices,...(themes[id]?.prices&&typeof themes[id].prices==='object'?themes[id].prices:{})}}]));
+ return merged;
+ }catch{return base;}
 }
 function cleanConfig(obj){
  if(!obj||typeof obj!=='object'||Array.isArray(obj))throw Error('Invalid settings');
@@ -269,7 +287,7 @@ export async function onRequest({request,env,waitUntil}){
   }
   if(method==='POST'&&path==='bookings'){
    const b=await readBody(request),sess=await readSession(request,env),c=await site(env);
-   if(!b)return err('Invalid booking');if(!c.booking.enabled)return err('Bookings are temporarily closed',403);
+   if(!b)return err('Invalid booking');if(b.accountContext==='business'&&sess?.role!=='business')return err('Your company session has expired. Sign into the Business Portal again to use your company rates.',401);if(!c.booking.enabled)return err('Bookings are temporarily closed',403);
    const name=text(b.name,90),phone=text(b.phone,35),email=text(b.email,180).toLowerCase(),vehicle=text(b.vehicle,40),date=text(b.date,15),time=text(b.time,10),service_location=text(b.location,20),address=text(b.address,240),notes=text(b.notes,500);
    if(name.length<2||!/^\S+@\S+\.\S+$/.test(email)||phone.length<7||!c.vehicles.some(v=>v.id===vehicle)||!dateOk(date,sess?.role==='business'?30:7)||timePassed(date,time)||!c.booking.timeSlots.includes(time)||!['mobile','dropoff'].includes(service_location))return err('Please complete all required fields');
    if(service_location==='mobile'&&address.length<8)return err('Please enter the mobile detailing address');
