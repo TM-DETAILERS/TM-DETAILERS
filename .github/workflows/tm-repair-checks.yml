@@ -1,0 +1,27 @@
+name: TM Detailers repair checks
+
+on:
+  push:
+    branches:
+      - 'repair/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Validate site files and booking workflows
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repair branch
+        uses: actions/checkout@v4
+      - name: Use Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check pages, imports and syntax
+        run: node tests/recovery-audit.mjs static
+      - name: Exercise isolated SQLite booking API
+        run: node --experimental-default-type=module tests/recovery-audit.mjs api
