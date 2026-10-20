@@ -88,19 +88,65 @@ function cleanConfig(obj){
  c.gallery=(Array.isArray(obj.gallery)?obj.gallery:[]).slice(0,20).map((g,i)=>({id:text(g.id,45)||`g${i}`,src:text(g.src,500),caption:text(g.caption,120),alt:text(g.alt,120),link:text(g.link,500)}));
  if(c.gallery.some(g=>!validURL(g.src)||!validURL(g.link)))throw Error('Invalid gallery URL');
  c.booking.maxPerDay=Math.min(6,Math.max(1,Math.round(Number(obj.booking?.maxPerDay)||2)));
+ c.contact.dropoffAddress=text(obj.contact?.dropoffAddress,240);
  c.booking.blockedDates=(Array.isArray(obj.booking?.blockedDates)?obj.booking.blockedDates:[]).filter(d=>typeof d==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)).slice(0,180);
  c.booking.timeSlots=(Array.isArray(obj.booking?.timeSlots)?obj.booking.timeSlots:DEFAULT_SITE.booking.timeSlots).filter(x=>/^([01]\d|2[0-3]):[0-5]\d$/.test(x)).slice(0,12);
  c.sections=Object.fromEntries(Object.keys(DEFAULT_SITE.sections).map(k=>[k,obj.sections?.[k]!==false]));
  return c;
 }
-function dateOk(d){
- if(!/^\d{4}-\d{2}-\d{2}$/.test(d||''))return false;
- const dt=new Date(d+'T12:00:00Z');
- const today=new Date(new Date().toLocaleDateString('en-CA',{timeZone:'America/Toronto'})+'T12:00:00Z');
- return Number.isFinite(dt.getTime())&&dt.toISOString().slice(0,10)===d&&dt>=today&&dt<=new Date(today.getTime()+120*86400000);
+// Calendar dates are always calculated in the business's Toronto timezone.
+const torontoParts=(now=new Date()) => Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:'America/Toronto',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(now).filter(x=>x.type!=='literal').map(x=>[x.type,x.value]));
+const localToday=()=>{const p=torontoParts();return `${p.year}-${p.month}-${p.day}`;};
+const addDays=(iso,n)=>{const d=new Date(iso+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+n);return d.toISOString().slice(0,10);};
+const validDate=d=>/^\d{4}-\d{2}-\d{2}$/.test(d||'')&&Number.isFinite(Date.parse(d+'T12:00:00Z'))&&new Date(d+'T12:00:00Z').toISOString().slice(0,10)===d;
+const dateOk=(d,days=7)=>validDate(d)&&d>=localToday()&&d<=addDays(localToday(),days);
+const timePassed=(d,t)=>{const now=torontoParts();return d===localToday()&&t<=now.hour+':'+now.minute;};
+const uuidOK=x=>/^[0-9a-f-]{36}$/i.test(x||'');
+const bookingRefOK=x=>/^TM-[A-Z0-9]{8}$/.test(x||'');
+const publicFields = async (env,bookingId) => {
+ const row=await env.DB.prepare('SELECT headline,status_message,next_step,eta_text FROM booking_public_details WHERE booking_id=?').bind(bookingId).first();
+ return row||{headline:'',status_message:'',next_step:'',eta_text:''};
+};
+const photoList=async (env,bookingId)=>{
+ const rows=await env.DB.prepare('SELECT id,kind,caption,created_at FROM booking_photos WHERE booking_id=? ORDER BY created_at ASC').bind(bookingId).all();
+ return rows.results||[];
+};
+const customerBooking=async (env,ref,email)=>{
+ if(!bookingRefOK(ref)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return null;
+ return env.DB.prepare('SELECT * FROM bookings WHERE reference=? AND email=?').bind(ref,email).first();
+};
+const photoMagic = async f=>{
+ const b=new Uint8Array(await f.slice(0,12).arrayBuffer());
+ return f.type==='image/jpeg'&&b[0]===255&&b[1]===216&&b[2]===255 || f.type==='image/png'&&b[0]===137&&b[1]===80&&b[2]===78&&b[3]===71 || f.type==='image/webp'&&String.fromCharCode(...b.slice(0,4))==='RIFF'&&String.fromCharCode(...b.slice(8,12))==='WEBP';
+};
+
+const MAIL_SUBJECT='TM Detailers';
+async function notify(env,to,subject,message){
+ if(!env.RESEND_API_KEY||!env.MAIL_FROM||!to)return {sent:false,reason:'Email provider not configured'};
+ try{const resp=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:'Bearer '+env.RESEND_API_KEY,'Content-Type':'application/json'},body:JSON.stringify({from:env.MAIL_FROM,to:[to],subject,text:message}),signal:AbortSignal.timeout(6000)});if(!resp.ok){console.error('Mail delivery rejected',resp.status);return {sent:false,reason:'Email service rejected the message'};}return {sent:true};}
+ catch(e){console.error('Mail connection issue',e);return {sent:false,reason:'Mail temporarily unavailable'};}
+}
+async function notifyBooking(env,row,kind='requested'){
+ const place=row.service_location==='mobile'?'Mobile appointment: '+row.address:'Drop-off: '+(await site(env)).contact.dropoffAddress;
+ const lines=['TM Detailers — '+kind,'Booking: '+row.reference,'Status: '+row.status,'Customer: '+row.customer_name,'Vehicle: '+row.vehicle,'Date: '+row.appointment_date,'Time: '+row.appointment_time,'Location: '+place,'Estimated price: $'+row.quoted_price+' CAD','Manage or check: https://tmdetailers.ca/track/'];
+ const result=await notify(env,row.email,MAIL_SUBJECT+' — booking '+kind+' ('+row.reference+')',lines.join('\n'));
+ if(env.OWNER_NOTIFICATION_EMAIL)await notify(env,env.OWNER_NOTIFICATION_EMAIL,MAIL_SUBJECT+' — '+kind+' '+row.reference,lines.join('\n'));
+ return result;
+}
+async function calendar(env,sess,c){
+ const days=sess?.role==='business'?30:7,first=localToday(),last=addDays(first,days);
+ const taken=await env.DB.prepare("SELECT appointment_date,appointment_time,COUNT(*) AS n FROM bookings WHERE appointment_date BETWEEN ? AND ? AND status IN ('pending','confirmed','in_progress') GROUP BY appointment_date,appointment_time").bind(first,last).all();
+ const map=new Map();for(const r of taken.results||[]){const v=map.get(r.appointment_date)||{};v[r.appointment_time]=Number(r.n);map.set(r.appointment_date,v);}
+ const dates=[];for(let i=0;i<=days;i++){
+  const d=addDays(first,i),count=map.get(d)||{},dayTotal=Object.values(count).reduce((a,b)=>a+b,0);
+  const closed=!c.booking.enabled||c.booking.blockedDates?.includes(d)||dayTotal>=c.booking.maxPerDay;
+  const slots=c.booking.timeSlots.map(time=>({time,available:!closed&&!count[time]&&!timePassed(d,time)}));
+  dates.push({date:d,available:slots.some(x=>x.available),slots,remaining:Math.max(0,c.booking.maxPerDay-dayTotal)});
+ }
+ return {ok:true,dates,first,last,windowDays:days};
 }
 const result=async (statement) => {try{return await statement;}catch(e){console.error('D1 error',e);throw e;}};
-export async function onRequest({request,env}){
+export async function onRequest({request,env,waitUntil}){
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/?/,'').replace(/\/$/,'');
  if(!env.DB)return err('Database not configured yet. See SETUP.md.',503);
  if(!env.SESSION_SECRET||env.SESSION_SECRET.length<32||!env.ADMIN_PASSWORD||env.ADMIN_PASSWORD.length<12)return err('Site security setup incomplete. See SETUP.md.',503);
@@ -142,32 +188,69 @@ export async function onRequest({request,env}){
    return json({ok:true,role:'business',label:a.label,prices:JSON.parse(a.pricing_json)},200,{'Set-Cookie':setCookie(await makeToken({role:'business',id:a.id,exp:Date.now()+duration*1000},env),duration)});
   }
   if(method==='POST'&&path==='logout')return json({ok:true},200,{'Set-Cookie':setCookie('',0)});
+  if(method==='GET'&&path==='calendar'){const sess=await readSession(request,env);return json(await calendar(env,sess,await site(env)));}
   if(method==='GET'&&path==='availability'){
-   const date=url.searchParams.get('date');if(!dateOk(date))return err('Pick a valid appointment date');
-   const row=await env.DB.prepare("SELECT COUNT(*) AS n FROM bookings WHERE appointment_date=? AND status IN ('pending','confirmed')").bind(date).first();
+   const date=url.searchParams.get('date'),sess=await readSession(request,env);if(!dateOk(date,sess?.role==='business'?30:7))return err('Choose a date within the booking window');
+   const row=await env.DB.prepare("SELECT COUNT(*) AS n FROM bookings WHERE appointment_date=? AND status IN ('pending','confirmed','in_progress')").bind(date).first();
    const c=await site(env),blocked=(c.booking.blockedDates||[]).includes(date);return json({ok:true,booked:Number(row.n),max:c.booking.maxPerDay,available:c.booking.enabled&&!blocked&&Number(row.n)<c.booking.maxPerDay,reason:blocked?'That date is not accepting bookings.':!c.booking.enabled?'Online bookings are currently closed.':Number(row.n)>=c.booking.maxPerDay?'That date is fully booked.':null});
   }
   if(method==='POST'&&path==='bookings'){
    const b=await readBody(request),sess=await readSession(request,env),c=await site(env);
    if(!b)return err('Invalid booking');if(!c.booking.enabled)return err('Bookings are temporarily closed',403);
    const name=text(b.name,90),phone=text(b.phone,35),email=text(b.email,180).toLowerCase(),vehicle=text(b.vehicle,40),date=text(b.date,15),time=text(b.time,10),service_location=text(b.location,20),address=text(b.address,240),notes=text(b.notes,500);
-   if(name.length<2||!/^\S+@\S+\.\S+$/.test(email)||phone.length<7||!c.vehicles.some(v=>v.id===vehicle)||!dateOk(date)||!c.booking.timeSlots.includes(time)||!['mobile','dropoff'].includes(service_location))return err('Please complete all required fields');
+   if(name.length<2||!/^\S+@\S+\.\S+$/.test(email)||phone.length<7||!c.vehicles.some(v=>v.id===vehicle)||!dateOk(date,sess?.role==='business'?30:7)||timePassed(date,time)||!c.booking.timeSlots.includes(time)||!['mobile','dropoff'].includes(service_location))return err('Please complete all required fields');
    if(service_location==='mobile'&&address.length<8)return err('Please enter the mobile detailing address');
+   if(service_location==='mobile'&&b.utilitiesOK!==true)return err('Please confirm access to an outdoor water tap and power outlet.');
    if((c.booking.blockedDates||[]).includes(date))return err('This date is not available',409);
    const holiday=c.themeProfiles?.[c.theme]?.prices||{};
    let p=Number.isFinite(holiday[vehicle])?holiday[vehicle]:c.vehicles.find(v=>v.id===vehicle).price,accountId=null;
    if(sess?.role==='business'){p=Number(sess.prices[vehicle]);accountId=sess.id;if(!Number.isFinite(p)||p<0)return err('Price unavailable');}
+   let fleetId=null,deptId=null;
+   if(b.fleetId){
+    if(sess?.role!=='business'||!uuidOK(b.fleetId))return err('Please sign into the company fleet first',401);
+    const fleet=await env.DB.prepare('SELECT f.id,f.department_id,f.vehicle FROM fleet_vehicles f WHERE f.id=? AND f.business_account_id=? AND f.active=1').bind(b.fleetId,sess.id).first();
+    if(!fleet||fleet.vehicle!==vehicle)return err('Selected fleet vehicle does not match the vehicle category',400);
+    fleetId=fleet.id;deptId=fleet.department_id;
+   }
    const id=crypto.randomUUID(),reference='TM-'+crypto.randomUUID().slice(0,8).toUpperCase();
-   const inserted=await env.DB.prepare(`INSERT INTO bookings (id,reference,customer_name,email,phone,service_location,address,vehicle,appointment_date,appointment_time,notes,quoted_price,business_account_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM bookings WHERE appointment_date=? AND status IN ('pending','confirmed')) < ? AND NOT EXISTS (SELECT 1 FROM bookings WHERE appointment_date=? AND appointment_time=? AND status IN ('pending','confirmed'))`).bind(id,reference,name,email,phone,service_location,address,vehicle,date,time,notes,Math.round(p),accountId,date,c.booking.maxPerDay,date,time).run();
+   const inserted=await env.DB.prepare(`INSERT INTO bookings (id,reference,customer_name,email,phone,service_location,address,vehicle,appointment_date,appointment_time,notes,quoted_price,business_account_id,fleet_vehicle_id,department_id) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM bookings WHERE appointment_date=? AND status IN ('pending','confirmed','in_progress')) < ? AND NOT EXISTS (SELECT 1 FROM bookings WHERE appointment_date=? AND appointment_time=? AND status IN ('pending','confirmed','in_progress'))`).bind(id,reference,name,email,phone,service_location,address,vehicle,date,time,notes,Math.round(p),accountId,fleetId,deptId,date,c.booking.maxPerDay,date,time).run();
    if(!inserted.meta?.changes)return err('That date or time is unavailable. Please choose another appointment.',409);
-   return json({ok:true,reference,notice:'Request received. TM Detailers will contact you to confirm.'},201);
+   const emailQueued=Boolean(env.RESEND_API_KEY&&env.MAIL_FROM);if(emailQueued&&waitUntil)waitUntil(notifyBooking(env,{reference,customer_name:name,email,phone,service_location,address,vehicle,appointment_date:date,appointment_time:time,quoted_price:Math.round(p),status:'pending'},'requested'));
+   return json({ok:true,reference,emailQueued,notice:'Request recorded. Await confirmation from TM Detailers.'},201);
   }
   if(method==='POST'&&path==='lookup'){
    const b=await readBody(request);if(!b)return err('Invalid request');
    const ref=text(b.reference,40).toUpperCase(),email=text(b.email,180).toLowerCase();
-   if(!/^TM-[A-Z0-9]{8}$/.test(ref)||!/^\S+@\S+\.\S+$/.test(email))return err('Booking not found',404);
-   const r=await env.DB.prepare('SELECT reference,vehicle,appointment_date,appointment_time,service_location,status,quoted_price,notes FROM bookings WHERE reference=? AND email=?').bind(ref,email).first();
-   return r?json({ok:true,booking:r}):err('Booking not found',404);
+   const booking=await customerBooking(env,ref,email);
+   if(!booking)return err('Booking not found',404);
+   const c=await site(env),publicInfo=await publicFields(env,booking.id);
+   const requests=await env.DB.prepare('SELECT id,kind,message,status,created_at,reviewed_at FROM booking_requests WHERE booking_id=? ORDER BY created_at DESC LIMIT 20').bind(booking.id).all();
+   const visible={reference:booking.reference,customer_name:booking.customer_name,vehicle:booking.vehicle,appointment_date:booking.appointment_date,appointment_time:booking.appointment_time,service_location:booking.service_location,service_address:booking.service_location==='dropoff'?c.contact.dropoffAddress:booking.address,status:booking.status,quoted_price:booking.quoted_price,notes:booking.notes,company_booking:Boolean(booking.business_account_id),public_info:publicInfo,photos:await photoList(env,booking.id),requests:requests.results||[]};
+   return json({ok:true,booking:visible});
+  }
+  // Booking photos are PRIVATE: image bytes require a verified booking reference/email or owner session.
+  if(method==='POST'&&path==='booking-photos/upload'){
+   const form=await request.formData(),f=form.get('image'),kind=text(form.get('kind'),20),sess=await readSession(request,env),isOwner=sess?.role==='admin';
+   if(!['before','after'].includes(kind))return err('Choose a photo category');
+   if(!isOwner&&kind!=='before')return err('Only TM Detailers can add after photos',403);
+   if(!f||typeof f.arrayBuffer!=='function'||f.size<100||f.size>500000||!await photoMagic(f))return err('Upload a JPEG, PNG or WebP under 500 KB. Your phone can resize larger photos.');
+   const bid=text(form.get('bookingId'),50),ref=text(form.get('reference'),40).toUpperCase(),email=text(form.get('email'),180).toLowerCase();
+   let booking=isOwner&&uuidOK(bid)?await env.DB.prepare('SELECT id,status FROM bookings WHERE id=?').bind(bid).first():await customerBooking(env,ref,email);
+   if(!booking)return err('Booking not found or access denied',404);
+   if(!isOwner&&['completed','cancelled'].includes(booking.status))return err('Photos cannot be added after the appointment is closed',403);
+   const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM booking_photos WHERE booking_id=? AND kind=?').bind(booking.id,kind).first();
+   if(Number(count.n)>=4)return err('Maximum four '+kind+' photos per booking. Ask TM Detailers to change these photos.');
+   const id=crypto.randomUUID();await env.DB.prepare('INSERT INTO booking_photos (id,booking_id,kind,caption,mime,data) VALUES (?,?,?,?,?,?)').bind(id,booking.id,kind,text(form.get('caption'),160),f.type,new Uint8Array(await f.arrayBuffer())).run();
+   return json({ok:true,photo:{id,kind,caption:text(form.get('caption'),160)}},201);
+  }
+  if(method==='POST'&&path==='booking-photos/view'){
+   const b=await readBody(request);if(!b||!uuidOK(b.id))return err('Image not found',404);
+   const r=await env.DB.prepare('SELECT p.id,p.booking_id,p.mime,p.data,b.reference,b.email FROM booking_photos p JOIN bookings b ON b.id=p.booking_id WHERE p.id=?').bind(b.id).first();
+   if(!r)return err('Image not found',404);
+   const sess=await readSession(request,env);
+   const customerAllowed=bookingRefOK(text(b.reference,40).toUpperCase())&&text(b.reference,40).toUpperCase()===r.reference&&text(b.email,180).toLowerCase()===r.email;
+   if(sess?.role!=='admin'&&!customerAllowed)return err('Not authorized',403);
+   return new Response(new Uint8Array(r.data),{status:200,headers:{'content-type':r.mime,'cache-control':'no-store, private','x-content-type-options':'nosniff','content-security-policy':"default-src 'none'; sandbox",'referrer-policy':'no-referrer'}});
   }
   if(method==='POST'&&path==='booking-request'){
    const payload=await readBody(request);if(!payload)return err('Invalid request');
@@ -176,12 +259,64 @@ export async function onRequest({request,env}){
    const message=text(payload.message,350);
    if(!type||!/^TM-[A-Z0-9]{8}$/.test(ref)||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))return err('Invalid request');
    if(type==='DATE / TIME CHANGE REQUEST'&&message.length<8)return err('Describe your requested change');
-   const entry='['+type+' — '+new Date().toISOString().slice(0,16)+' UTC] '+message;
-   const row=await env.DB.prepare("UPDATE bookings SET notes=substr(COALESCE(notes,'') || char(10) || ?, 1, 1800) WHERE reference=? AND email=? AND status NOT IN ('completed','cancelled')").bind(entry,ref,email).run();
-   return row.meta?.changes?json({ok:true,message:'Your request has been recorded. TM Detailers will review it.'}):err('Booking not found or already completed',404);
+   const booking=await env.DB.prepare("SELECT id,reference,email,status FROM bookings WHERE reference=? AND email=? AND status NOT IN ('completed','cancelled')").bind(ref,email).first();
+   if(!booking)return err('Booking not found or no longer eligible for changes',404);
+   const existing=await env.DB.prepare("SELECT COUNT(*) AS n FROM booking_requests WHERE booking_id=? AND status='open'").bind(booking.id).first();
+   if(Number(existing?.n)>=3)return err('You already have several open requests. Contact TM Detailers.',429);
+   await env.DB.prepare('INSERT INTO booking_requests (id,booking_id,kind,message) VALUES (?,?,?,?)').bind(crypto.randomUUID(),booking.id,type==='CANCELLATION REQUEST'?'cancel':'reschedule',message).run();
+   if(env.OWNER_NOTIFICATION_EMAIL&&waitUntil)waitUntil(notify(env,env.OWNER_NOTIFICATION_EMAIL,MAIL_SUBJECT+' — booking change request '+ref,`${ref}\n${type}\n${message}\nOpen Owner Studio to review.`));
+   return json({ok:true,message:'Your request was sent to the owner review queue.'});
+  }
+  // Business-only fleet management; membership is checked in every query.
+  if((path==='business/fleet'||path==='business/departments') && ['GET','POST'].includes(method)){
+   const sess=await readSession(request,env);if(sess?.role!=='business')return err('Business login required',401);
+   if(method==='GET'){
+    const d=await env.DB.prepare('SELECT id,name FROM fleet_departments WHERE business_account_id=? ORDER BY name').bind(sess.id).all();
+    const vehicles=await env.DB.prepare('SELECT f.id,f.department_id,f.vehicle,f.make,f.model,f.model_year,f.label,d.name department FROM fleet_vehicles f LEFT JOIN fleet_departments d ON d.id=f.department_id WHERE f.business_account_id=? AND f.active=1 ORDER BY d.name,f.make,f.model').bind(sess.id).all();
+    return json({ok:true,departments:d.results||[],fleet:vehicles.results||[]});
+   }
+   const b=await readBody(request);if(!b)return err('Invalid request');
+   if(path==='business/departments'){
+    const name=text(b.name,70);if(name.length<2)return err('Enter a department name');
+    const existing=await env.DB.prepare('SELECT COUNT(*) AS n FROM fleet_departments WHERE business_account_id=?').bind(sess.id).first();if(existing.n>=25)return err('Department limit reached',429);
+    await env.DB.prepare('INSERT INTO fleet_departments (id,business_account_id,name) VALUES (?,?,?)').bind(crypto.randomUUID(),sess.id,name).run();return json({ok:true},201);
+   }
+   const vehicle=text(b.vehicle,35),make=text(b.make,55),model=text(b.model,55),label=text(b.label,70),year=Number(b.year)||null;
+   const cfg=await site(env);if(!cfg.vehicles.some(v=>v.id===vehicle)||!make||!model||year&&(!Number.isInteger(year)||year<1980||year>2100))return err('Enter a valid fleet vehicle');
+   let depId=null;if(b.departmentId){const dept=await env.DB.prepare('SELECT id FROM fleet_departments WHERE id=? AND business_account_id=?').bind(b.departmentId,sess.id).first();if(!dept)return err('Invalid department');depId=dept.id;}
+   const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM fleet_vehicles WHERE business_account_id=? AND active=1').bind(sess.id).first();if(count.n>=300)return err('Fleet vehicle limit reached',429);
+   await env.DB.prepare('INSERT INTO fleet_vehicles (id,business_account_id,department_id,vehicle,make,model,model_year,label) VALUES (?,?,?,?,?,?,?,?)').bind(crypto.randomUUID(),sess.id,depId,vehicle,make,model,year,label).run();return json({ok:true},201);
+  }
+  if(method==='DELETE'&&/^business\/fleet\/[0-9a-f-]{36}$/.test(path)){
+   const sess=await readSession(request,env);if(sess?.role!=='business')return err('Business login required',401);
+   const done=await env.DB.prepare('UPDATE fleet_vehicles SET active=0 WHERE id=? AND business_account_id=?').bind(path.split('/')[2],sess.id).run();return done.meta.changes?json({ok:true}):err('Vehicle not found',404);
   }
   const sess=await readSession(request,env);
   if(!path.startsWith('admin/')||sess?.role!=='admin')return err('Not authorized',401);
+  if(method==='GET'&&path==='admin/track'){
+   const ref=text(url.searchParams.get('reference'),40).toUpperCase();if(!bookingRefOK(ref))return err('Enter a booking reference');
+   const booking=await env.DB.prepare('SELECT * FROM bookings WHERE reference=?').bind(ref).first();
+   if(!booking)return err('Booking not found',404);
+   const c=await site(env),reqs=await env.DB.prepare('SELECT id,kind,message,status,created_at,reviewed_at FROM booking_requests WHERE booking_id=? ORDER BY created_at DESC LIMIT 30').bind(booking.id).all();
+   return json({ok:true,booking:{...booking,service_address:booking.service_location==='dropoff'?c.contact.dropoffAddress:booking.address,public_info:await publicFields(env,booking.id),photos:await photoList(env,booking.id),requests:reqs.results||[]}});
+  }
+  if(method==='PUT'&&/^admin\/track\/[0-9a-f-]{36}$/.test(path)){
+   const id=path.split('/')[2],b=await readBody(request);
+   if(!b)return err('Invalid tracking details');
+   const exists=await env.DB.prepare('SELECT id FROM bookings WHERE id=?').bind(id).first();if(!exists)return err('Booking not found',404);
+   const headline=text(b.headline,140),message=text(b.status_message,650),next=text(b.next_step,500),eta=text(b.eta_text,120);
+   await env.DB.prepare('INSERT INTO booking_public_details (booking_id,headline,status_message,next_step,eta_text,updated_at) VALUES (?,?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(booking_id) DO UPDATE SET headline=excluded.headline,status_message=excluded.status_message,next_step=excluded.next_step,eta_text=excluded.eta_text,updated_at=CURRENT_TIMESTAMP').bind(id,headline,message,next,eta).run();
+   return json({ok:true,message:'Customer-visible tracker updated'});
+  }
+  if(method==='DELETE'&&/^admin\/booking-photos\/[0-9a-f-]{36}$/.test(path)){
+   const id=path.split('/')[2],r=await env.DB.prepare('DELETE FROM booking_photos WHERE id=?').bind(id).run();
+   return r.meta?.changes?json({ok:true}):err('Photo not found',404);
+  }
+  if(method==='PATCH'&&/^admin\/booking-photos\/[0-9a-f-]{36}$/.test(path)){
+   const id=path.split('/')[2],b=await readBody(request);if(!b)return err('Invalid caption');
+   const r=await env.DB.prepare('UPDATE booking_photos SET caption=? WHERE id=?').bind(text(b.caption,160),id).run();
+   return r.meta?.changes?json({ok:true}):err('Photo not found',404);
+  }
   if(method==='GET'&&path==='admin/site')return json({ok:true,site:await site(env)});
   if(method==='GET'&&path==='admin/overview'){
    const data=await env.DB.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending, SUM(CASE WHEN status='confirmed' THEN 1 ELSE 0 END) AS confirmed FROM bookings").first();
@@ -235,15 +370,42 @@ export async function onRequest({request,env}){
    await env.DB.prepare('UPDATE business_accounts SET label=?,pricing_json=?,active=? WHERE id=?').bind(text(b.label,100),JSON.stringify(prices),b.active?1:0,id).run();
    return json({ok:true});
   }
+  if(method==='GET'&&/^admin\/business\/[0-9a-f-]{36}\/fleet$/.test(path)){
+   const id=path.split('/')[2];const departments=await env.DB.prepare('SELECT id,name FROM fleet_departments WHERE business_account_id=? ORDER BY name').bind(id).all();
+   const fleet=await env.DB.prepare('SELECT f.*,d.name AS department FROM fleet_vehicles f LEFT JOIN fleet_departments d ON d.id=f.department_id WHERE f.business_account_id=? AND f.active=1 ORDER BY f.make,f.model').bind(id).all();
+   return json({ok:true,departments:departments.results||[],fleet:fleet.results||[]});
+  }
   if(method==='GET'&&path==='admin/bookings'){
-   const rows=await env.DB.prepare('SELECT * FROM bookings ORDER BY appointment_date DESC,appointment_time DESC LIMIT 300').all();
+   const rows=await env.DB.prepare('SELECT b.*,a.label AS business_label,f.make AS fleet_make,f.model AS fleet_model,f.label AS fleet_label,d.name AS department_name FROM bookings b LEFT JOIN business_accounts a ON a.id=b.business_account_id LEFT JOIN fleet_vehicles f ON f.id=b.fleet_vehicle_id LEFT JOIN fleet_departments d ON d.id=b.department_id ORDER BY b.appointment_date DESC,b.appointment_time DESC LIMIT 500').all();
    return json({ok:true,bookings:rows.results});
   }
-  if(method==='PUT'&&path.startsWith('admin/bookings/')){
+  if(method==='GET'&&path==='admin/requests'){
+   const rows=await env.DB.prepare(`SELECT r.id,r.booking_id,r.kind,r.message,r.status,r.created_at,r.reviewed_at,b.reference,b.customer_name,b.email,b.appointment_date,b.appointment_time FROM booking_requests r JOIN bookings b ON b.id=r.booking_id ORDER BY CASE WHEN r.status='open' THEN 0 ELSE 1 END,r.created_at DESC LIMIT 500`).all();
+   return json({ok:true,requests:rows.results||[]});
+  }
+  if(method==='PUT'&&/^admin\/requests\/[0-9a-f-]{36}$/.test(path)){
    const id=path.split('/')[2],b=await readBody(request);
-   if(!/^[0-9a-f-]{36}$/.test(id||'')||!['pending','confirmed','completed','cancelled'].includes(b?.status))return err('Invalid status');
-   await env.DB.prepare('UPDATE bookings SET status=? WHERE id=?').bind(b.status,id).run();
-   return json({ok:true});
+   if(!['approved','declined'].includes(b?.status))return err('Choose approved or declined');
+   const requestRow=await env.DB.prepare('SELECT id,booking_id,status FROM booking_requests WHERE id=?').bind(id).first();if(!requestRow||requestRow.status!=='open')return err('Request already reviewed',409);
+   const result=await env.DB.prepare("UPDATE booking_requests SET status=?,reviewed_at=CURRENT_TIMESTAMP WHERE id=? AND status='open'").bind(b.status,id).run();
+   if(!result.meta.changes)return err('Request already handled',409);
+   return json({ok:true,message:'Request marked '+b.status+'. Edit or cancel the booking separately if approved.'});
+  }
+  if(method==='PUT'&&/^admin\/bookings\/[0-9a-f-]{36}$/.test(path)){
+   const id=path.split('/')[2],b=await readBody(request);if(!b)return err('Invalid booking');
+   const old=await env.DB.prepare('SELECT * FROM bookings WHERE id=?').bind(id).first();if(!old)return err('Booking not found',404);
+   const name=text(b.name,90),email=text(b.email,180).toLowerCase(),phone=text(b.phone,35),vehicle=text(b.vehicle,40),date=text(b.date,15),time=text(b.time,10),address=text(b.address,240),notes=text(b.notes,1800),location=text(b.location,20),status=text(b.status,20),price=Number(b.price);
+   const c=await site(env);
+   if(name.length<2||!/^\S+@\S+\.\S+$/.test(email)||phone.length<7||!c.vehicles.some(v=>v.id===vehicle)||!validDate(date)||!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)||!['pending','confirmed','in_progress','completed','cancelled'].includes(status)||!['mobile','dropoff'].includes(location)||!Number.isFinite(price)||price<0||price>10000)return err('Please correct the booking fields');
+   if(location==='mobile'&&address.length<8)return err('Enter the mobile service address');
+   if(status==='pending'||status==='confirmed'){
+    const conflict=await env.DB.prepare("SELECT id FROM bookings WHERE id!=? AND appointment_date=? AND appointment_time=? AND status IN ('pending','confirmed','in_progress') LIMIT 1").bind(id,date,time).first();
+    if(conflict)return err('Another booking already occupies that date and time',409);
+   }
+   await env.DB.prepare('UPDATE bookings SET customer_name=?,email=?,phone=?,vehicle=?,appointment_date=?,appointment_time=?,service_location=?,address=?,notes=?,quoted_price=?,status=? WHERE id=?').bind(name,email,phone,vehicle,date,time,location,address,notes,Math.round(price),status,id).run();
+   const updated=await env.DB.prepare('SELECT * FROM bookings WHERE id=?').bind(id).first();
+   const emailQueued=Boolean(env.RESEND_API_KEY&&env.MAIL_FROM);if(emailQueued&&waitUntil)waitUntil(notifyBooking(env,updated,old.status!==status?status:'updated'));
+   return json({ok:true,emailQueued});
   }
   if(method==='DELETE'&&/^admin\/bookings\/[0-9a-f-]{36}$/.test(path)){
    const id=path.split('/')[2],body=await readBody(request);
