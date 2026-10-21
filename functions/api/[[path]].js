@@ -224,6 +224,23 @@ function publicError(e){
 
 export async function onRequest({request,env,waitUntil}){
  const url=new URL(request.url),path=url.pathname.replace(/^\/api\/?/,'').replace(/\/$/,'');
+ // Self-heal an older production D1 schema using ONLY additive, idempotent DDL.
+ // This restores required tables, missing fleet columns, and indexes; it never
+ // overwrites or deletes a customer, company, booking, or saved setting.
+ let schemaMigrationFailed=false;
+ if(env.DB&&env.SESSION_SECRET?.length>=32&&env.ADMIN_PASSWORD?.length>=12){
+  try{
+   const readiness=await schemaStatus(env);
+   if(!readiness.ready){
+    const upgrade=await repairSchema(env);
+    if(!upgrade.after.ready)throw new Error('Required tables or booking columns remain missing');
+    console.info('TM additive schema migration completed',{missingTables:readiness.missingTables,missingColumns:readiness.missingColumns});
+   }
+  }catch(e){
+   schemaMigrationFailed=true;
+   console.error('TM additive schema migration failed',e);
+  }
+ }
  if(request.method==='GET'&&path==='health'){
   const response={ok:true,version:'V6.2',api:'online',database:env.DB?'bound':'missing',security:(Boolean(env.SESSION_SECRET&&env.SESSION_SECRET.length>=32&&env.ADMIN_PASSWORD&&env.ADMIN_PASSWORD.length>=12)?'configured':'incomplete'),schema:'unknown'};
   if(env.DB)try{const status=await schemaStatus(env);response.schema=status.ready?'ready':'needs_repair';}catch(e){console.error('Health check database failed',e);response.schema='unavailable';}
@@ -233,6 +250,7 @@ export async function onRequest({request,env,waitUntil}){
 
  if(!env.DB)return err('Database not configured yet. See SETUP.md.',503);
  if(!env.SESSION_SECRET||env.SESSION_SECRET.length<32||!env.ADMIN_PASSWORD||env.ADMIN_PASSWORD.length<12)return err('Site security setup incomplete. See SETUP.md.',503);
+ if(schemaMigrationFailed)return err('Database upgrade failed; TM Detailers support must inspect the server logs.',503);
  const method=request.method;
  if(!['GET','POST','PUT','PATCH','DELETE'].includes(method))return err('Method not allowed',405);
  if(method!=='GET'&&!originCheck(request))return err('Origin not allowed',403);
