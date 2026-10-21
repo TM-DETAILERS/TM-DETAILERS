@@ -86,7 +86,7 @@ async function apiCheck() {
     return { status: response.status, data: await response.json(), cookie: (response.headers.get('set-cookie') || '').split(';')[0] };
   }
   let r = await call('GET', 'health');
-  check(r.status === 503 && r.data.schema === 'needs_repair', 'detect empty test schema without touching production');
+  check(r.status === 200 && r.data.schema === 'ready', 'empty database automatically receives additive schema upgrade');
   r = await call('POST', 'login', { kind: 'admin', password: env.ADMIN_PASSWORD });
   check(r.status === 200 && r.data.role === 'admin', 'owner signs in to blank test database');
   const ownerCookie = r.cookie;
@@ -137,6 +137,24 @@ async function apiCheck() {
   check(r.status === 200 && r.data.accounts.some(c => c.label==='Sample Fleet Co'), 'owner sees the company account');
   r = await call('GET', 'admin/bookings',undefined,ownerCookie);
   check(r.status === 200 && r.data.bookings.length >= 2, 'owner sees regular and business appointments');
+  // A partially migrated production-like D1 database must retain existing records.
+  const olderDB=new TestD1();
+  olderDB.db.exec(readFileSync(join(root,'database/schema.sql'),'utf8'));
+  olderDB.db.prepare('INSERT INTO business_accounts (id,label,code_hash,pricing_json) VALUES (?,?,?,?)')
+    .run('preserved-company','Original Company','test-hash-not-real',JSON.stringify({sedan:60}));
+  olderDB.db.prepare('INSERT INTO bookings (id,reference,customer_name,email,phone,service_location,address,vehicle,appointment_date,appointment_time,notes,quoted_price,business_account_id,status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run('preserved-booking','TM-1234ABCD','Original Customer','existing@example.invalid','4165550145','dropoff','', 'sedan','2026-10-20','11:00','Existing notes',80,'preserved-company','confirmed');
+  const legacyEnv={...env,DB:olderDB};
+  const legacyResponse=await onRequest({request:new Request(origin+'/api/health'),env:legacyEnv,waitUntil(){}});
+  const legacyHealth=await legacyResponse.json();
+  check(legacyResponse.status===200&&legacyHealth.schema==='ready','older database upgrades automatically at first request');
+  check(olderDB.db.prepare('SELECT COUNT(*) AS n FROM business_accounts').get().n===1,'existing company is preserved');
+  const preserved=olderDB.db.prepare("SELECT customer_name,notes,quoted_price,status FROM bookings WHERE id='preserved-booking'").get();
+  check(preserved?.customer_name==='Original Customer'&&preserved.notes==='Existing notes'&&preserved.quoted_price===80&&preserved.status==='confirmed','existing booking and all details are preserved');
+  const upgradedColumns=olderDB.db.prepare('PRAGMA table_info(bookings)').all().map(x=>x.name);
+  check(upgradedColumns.includes('department_id')&&upgradedColumns.includes('fleet_vehicle_id'),'legacy bookings receive missing fleet columns');
+  const legacySecond=await onRequest({request:new Request(origin+'/api/health'),env:legacyEnv,waitUntil(){}});
+  check(legacySecond.status===200,'automatic migration is safe to run again');
   console.log('Isolated API check completed: ' + passes + ' checks passed.');
 }
 
