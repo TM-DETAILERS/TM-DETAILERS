@@ -9,7 +9,7 @@ const defaults=read('public/assets/defaults.js').replace('export const DEFAULT_S
 const css=read('public/assets/studio-pro.css');
 html=html.replace(/<link[^>]+href="\/assets\/studio-pro\.css"[^>]*>/g,'');
 html=html.replace(/<link[^>]+https:\/\/fonts\.(?:googleapis|gstatic)\.com[^>]*>/g,'');
-html=html.replace('<script type="module" src="/assets/studio-pro.js"></script>','<style>'+css+'</style><script>window.TM_DEMO=true;</script><script>'+defaults+'\n'+js+'</script>');
+html=html.replace('<script type="module" src="/assets/studio-pro.js"></script>','<style>'+css+'</style>');
 const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
 const page=await browser.newPage({viewport:{width:1280,height:900}});
 const errors=[];
@@ -17,6 +17,9 @@ page.on('pageerror',error=>errors.push(error.message));
 page.setDefaultTimeout(4500);
 try{
  await page.setContent(html,{waitUntil:'domcontentloaded',timeout:15000});
+ await page.evaluate(()=>{window.TM_DEMO=true});
+ await page.addScriptTag({content:defaults});
+ await page.addScriptTag({content:js});
  assert.equal(await page.locator('#tm-login-form').count(),1,'login form available');
  console.log('Initial DOM:',JSON.stringify({workspace:await page.locator('#tm-workspace').count(),loginError:await page.locator('#tm-login-error').count(),scripts:await page.locator('script').count(),errors,bootAvailable:await page.evaluate(()=>typeof boot)}));
  await page.locator('#tm-pass').fill('demo');
