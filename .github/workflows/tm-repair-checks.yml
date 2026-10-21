@@ -25,3 +25,7 @@ jobs:
         run: node tests/recovery-audit.mjs static
       - name: Exercise isolated SQLite booking API
         run: node tests/recovery-audit.mjs api
+      - name: Install browser test runner
+        run: npm install --no-save --no-audit --no-fund playwright
+      - name: Verify Owner Studio company controls in Chrome
+        run: node tests/company-ui.mjs
