@@ -4,7 +4,7 @@ const sites = [
   "https://tm-detailers.pages.dev",
   "https://repair-restore-complete-site.tm-detailers.pages.dev"
 ];
-const pages = ["/api/health", "/api/site", "/api/calendar", "/api/availability?date=2026-10-21", "/api/session", "/version.txt", "/", "/studio/", "/checkout/", "/business/", "/track/"];
+const pages = ["/api/health", "/api/site", "/api/calendar", "/api/availability?date=2026-10-21", "/api/session", "/version.txt", "/", "/studio/", "/assets/studio-pro.js", "/assets/studio-pro.css", "/checkout/", "/business/", "/track/"];
 for (const site of sites) {
   console.log("\nSITE", site);
   for (const path of pages) {
@@ -33,6 +33,14 @@ for (const site of sites) {
         } catch {
           out.nonJSON = text.slice(0,120).replace(/\s+/g, " ");
         }
+      } else if(path === "/assets/studio-pro.js"){
+        out.ownerCompanyWorkspace=text.includes("async function companyDrawer(id)");
+        out.companyControlsWired=text.includes("document.querySelectorAll('[data-edit-fleet]')");
+        out.editableFleet=text.includes("function fleetEditor(");
+        out.bytes=text.length;
+      } else if(path === "/assets/studio-pro.css"){
+        out.modalAboveDrawer=text.includes(".tm-modal-scrim{z-index:320");
+        out.bytes=text.length;
       } else if (path === "/version.txt") {
         out.version = text.trim().slice(0,120);
       } else {
