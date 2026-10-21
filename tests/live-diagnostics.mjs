@@ -4,7 +4,7 @@ const sites = [
   "https://tm-detailers.pages.dev",
   "https://repair-restore-complete-site.tm-detailers.pages.dev"
 ];
-const pages = ["/api/health", "/api/site", "/version.txt", "/", "/studio/", "/checkout/", "/business/", "/track/"];
+const pages = ["/api/health", "/api/site", "/api/calendar", "/api/availability?date=2026-10-21", "/api/session", "/version.txt", "/", "/studio/", "/checkout/", "/business/", "/track/"];
 for (const site of sites) {
   console.log("\nSITE", site);
   for (const path of pages) {
