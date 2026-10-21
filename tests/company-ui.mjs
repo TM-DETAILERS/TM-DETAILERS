@@ -19,6 +19,8 @@ try{
  assert.equal(await page.locator('#tm-login-form').count(),1,'login form available');
  await page.locator('#tm-pass').fill('demo');
  await page.locator('#tm-login-form button[type="submit"]').click();
+ await page.waitForTimeout(450);
+ console.log('Login state:',JSON.stringify({visible:await page.locator('#tm-workspace').isVisible(),error:await page.locator('#tm-login-error').innerText(),pageErrors:errors,jsLoaded:await page.evaluate(()=>typeof window.TM_DEMO)}));
  await page.locator('#tm-workspace').waitFor({state:'visible'});
  await page.locator('.tm-nav button[data-view="business"]').first().click();
  await page.locator('button[data-company-open]').first().waitFor();
