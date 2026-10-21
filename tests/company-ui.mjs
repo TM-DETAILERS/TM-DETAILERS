@@ -44,6 +44,7 @@ try{
  await page.locator('#tm-dept-form').waitFor({state:'visible'});
  await page.locator('#tm-modal-close').click();
  await page.locator('#tm-fleet-add').click();
+ console.log('Fleet dialog state:',JSON.stringify(await page.evaluate(()=>({hidden:document.querySelector('#tm-modal-scrim')?.hidden,display:getComputedStyle(document.querySelector('#tm-modal-scrim')).display,zIndex:getComputedStyle(document.querySelector('#tm-modal-scrim')).zIndex,form:!!document.querySelector('#tm-fleet-form')}))),errors);
  await page.locator('#tm-fleet-form').waitFor({state:'visible'});
  await page.locator('#tm-modal-close').click();
  await page.locator('button[data-edit-fleet]').first().click();
