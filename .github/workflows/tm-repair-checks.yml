@@ -25,3 +25,6 @@ jobs:
         run: node tests/recovery-audit.mjs static
       - name: Exercise isolated SQLite booking API
         run: node tests/recovery-audit.mjs api
+      - name: Read-only production API diagnosis
+        if: always()
+        run: node tests/live-diagnostics.mjs
