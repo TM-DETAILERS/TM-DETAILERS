@@ -111,14 +111,14 @@ async function companyDrawer(id){
  $('#tm-company-rotate-main').onclick=()=>rotateCode(id);
  $('#tm-dept-add').onclick=()=>departmentEditor(id,null);
  $('#tm-fleet-add').onclick=()=>fleetEditor(id,null,departments);
- $('[data-edit-dept]').forEach(button=>button.onclick=()=>departmentEditor(id,departments.find(d=>d.id===button.dataset.editDept)));
- $('[data-delete-dept]').forEach(button=>button.onclick=async()=>{
+ document.querySelectorAll('[data-edit-dept]').forEach(button=>button.onclick=()=>departmentEditor(id,departments.find(d=>d.id===button.dataset.editDept)));
+ document.querySelectorAll('[data-delete-dept]').forEach(button=>button.onclick=async()=>{
   const dep=departments.find(d=>d.id===button.dataset.deleteDept);
   if(!dep||!confirm('Remove department "'+dep.name+'"? This only works after its vehicles have been moved.'))return;
   try{await request('admin/business/'+id+'/departments/'+dep.id,{method:'DELETE'});toast('Department removed');await companyDrawer(id)}catch(e){toast(e.message,true)}
  });
- $('[data-edit-fleet]').forEach(button=>button.onclick=()=>fleetEditor(id,fleet.find(v=>v.id===button.dataset.editFleet),departments));
- $('[data-remove-fleet]').forEach(button=>button.onclick=async()=>{
+ document.querySelectorAll('[data-edit-fleet]').forEach(button=>button.onclick=()=>fleetEditor(id,fleet.find(v=>v.id===button.dataset.editFleet),departments));
+ document.querySelectorAll('[data-remove-fleet]').forEach(button=>button.onclick=async()=>{
   const vehicle=fleet.find(v=>v.id===button.dataset.removeFleet);
   if(!vehicle||!confirm('Remove '+vehicle.make+' '+vehicle.model+' from the active fleet? Past bookings will stay saved.'))return;
   try{await request('admin/business/'+id+'/fleet/'+vehicle.id,{method:'DELETE'});toast('Vehicle removed; previous bookings preserved');await companyDrawer(id)}catch(e){toast(e.message,true)}
