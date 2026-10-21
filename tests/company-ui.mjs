@@ -8,6 +8,7 @@ const js=read('public/assets/studio-pro.js').replace("import { DEFAULT_SITE } fr
 const defaults=read('public/assets/defaults.js').replace('export const DEFAULT_SITE','const DEFAULT_SITE');
 const css=read('public/assets/studio-pro.css');
 html=html.replace(/<link[^>]+href="\/assets\/studio-pro\.css"[^>]*>/g,'');
+html=html.replace(/<link[^>]+https:\/\/fonts\.(?:googleapis|gstatic)\.com[^>]*>/g,'');
 html=html.replace('<script type="module" src="/assets/studio-pro.js"></script>','<style>'+css+'</style><script>window.TM_DEMO=true;</script><script>'+defaults+'\n'+js+'</script>');
 const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
 const page=await browser.newPage({viewport:{width:1280,height:900}});
@@ -17,10 +18,11 @@ page.setDefaultTimeout(4500);
 try{
  await page.setContent(html,{waitUntil:'domcontentloaded',timeout:15000});
  assert.equal(await page.locator('#tm-login-form').count(),1,'login form available');
+ console.log('Initial DOM:',JSON.stringify({workspace:await page.locator('#tm-workspace').count(),loginError:await page.locator('#tm-login-error').count(),scripts:await page.locator('script').count(),errors,bootAvailable:await page.evaluate(()=>typeof boot)}));
  await page.locator('#tm-pass').fill('demo');
  await page.locator('#tm-login-form button[type="submit"]').click();
  await page.waitForTimeout(450);
- console.log('Login state:',JSON.stringify({visible:await page.locator('#tm-workspace').isVisible(),error:await page.locator('#tm-login-error').innerText(),pageErrors:errors,jsLoaded:await page.evaluate(()=>typeof window.TM_DEMO)}));
+ console.log('Login state:',JSON.stringify({url:page.url(),workspace:await page.locator('#tm-workspace').count(),visible:await page.locator('#tm-workspace').isVisible().catch(()=>false),error:await page.locator('#tm-login-error').innerText({timeout:1000}).catch(()=>null),pageErrors:errors,jsLoaded:await page.evaluate(()=>typeof window.TM_DEMO)}));
  await page.locator('#tm-workspace').waitFor({state:'visible'});
  await page.locator('.tm-nav button[data-view="business"]').first().click();
  await page.locator('button[data-company-open]').first().waitFor();
