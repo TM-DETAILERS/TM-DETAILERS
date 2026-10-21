@@ -477,22 +477,86 @@ export async function onRequest({request,env,waitUntil}){
 
    return json({ok:true,id,code},201);
   }
+  // Company workspace. Every action is restricted to the authenticated OWNER above.
+  const ownerCompanyRoute=path.match(/^admin\/business\/([0-9a-f-]{36})\/(fleet|departments|bookings)(?:\/([0-9a-f-]{36}))?$/);
+  if(ownerCompanyRoute){
+   const companyId=ownerCompanyRoute[1],area=ownerCompanyRoute[2],itemId=ownerCompanyRoute[3];
+   const company=await env.DB.prepare('SELECT id,label,active FROM business_accounts WHERE id=?').bind(companyId).first();
+   if(!company)return err('Company account not found',404);
+   if(area==='bookings'){
+    if(method!=='GET'||itemId)return err('Method not allowed',405);
+    const rows=await env.DB.prepare("SELECT id,reference,customer_name,vehicle,appointment_date,appointment_time,status,quoted_price FROM bookings WHERE business_account_id=? ORDER BY appointment_date DESC,appointment_time DESC LIMIT 150").bind(companyId).all();
+    return json({ok:true,bookings:rows.results||[]});
+   }
+   if(method==='GET'&&!itemId){
+    const departments=await env.DB.prepare('SELECT id,name FROM fleet_departments WHERE business_account_id=? ORDER BY name').bind(companyId).all();
+    const fleet=await env.DB.prepare('SELECT f.id,f.business_account_id,f.department_id,f.vehicle,f.make,f.model,f.model_year,f.label,f.active,d.name AS department FROM fleet_vehicles f LEFT JOIN fleet_departments d ON d.id=f.department_id WHERE f.business_account_id=? AND f.active=1 ORDER BY f.make,f.model').bind(companyId).all();
+    return json({ok:true,departments:departments.results||[],fleet:fleet.results||[]});
+   }
+   if(area==='departments'){
+    if(method==='POST'&&!itemId){
+     const body=await readBody(request),name=text(body?.name,70);
+     if(name.length<2)return err('Enter a department name',400);
+     const count=await env.DB.prepare('SELECT COUNT(*) AS n FROM fleet_departments WHERE business_account_id=?').bind(companyId).first();
+     if(Number(count.n)>=30)return err('Maximum 30 departments per company',409);
+     const newId=crypto.randomUUID();
+     await env.DB.prepare('INSERT INTO fleet_departments(id,business_account_id,name) VALUES(?,?,?)').bind(newId,companyId,name).run();
+     return json({ok:true,id:newId},201);
+    }
+    if(method==='PUT'&&itemId){
+     const body=await readBody(request),name=text(body?.name,70);
+     if(name.length<2)return err('Enter a department name',400);
+     const result=await env.DB.prepare('UPDATE fleet_departments SET name=? WHERE id=? AND business_account_id=?').bind(name,itemId,companyId).run();
+     return result.meta?.changes?json({ok:true}):err('Department not found',404);
+    }
+    if(method==='DELETE'&&itemId){
+     const referenced=await env.DB.prepare('SELECT COUNT(*) AS n FROM fleet_vehicles WHERE department_id=? AND business_account_id=?').bind(itemId,companyId).first();
+     if(Number(referenced.n)>0)return err('Move or remove vehicles from this department before deleting it.',409);
+     const result=await env.DB.prepare('DELETE FROM fleet_departments WHERE id=? AND business_account_id=?').bind(itemId,companyId).run();
+     return result.meta?.changes?json({ok:true}):err('Department not found',404);
+    }
+   }
+   if(area==='fleet'){
+    if(method==='POST'&&!itemId||method==='PUT'&&itemId){
+     const body=await readBody(request);
+     const vehicle=text(body?.vehicle,35),make=text(body?.make,55),model=text(body?.model,55),label=text(body?.label,70),year=body?.year===''||body?.year==null?null:Number(body.year);
+     const cfg=await site(env);
+     if(!cfg.vehicles.some(v=>v.id===vehicle)||!make||!model||(year!==null&&(!Number.isInteger(year)||year<1980||year>2100)))return err('Enter a valid vehicle category, make, model and year.',400);
+     const deptId=body?.departmentId||null;
+     if(deptId){
+      if(!/^[0-9a-f-]{36}$/.test(deptId))return err('Invalid department',400);
+      const dep=await env.DB.prepare('SELECT id FROM fleet_departments WHERE id=? AND business_account_id=?').bind(deptId,companyId).first();
+      if(!dep)return err('Choose a department belonging to this company.',400);
+     }
+     if(method==='POST'){
+      const current=await env.DB.prepare('SELECT COUNT(*) AS n FROM fleet_vehicles WHERE business_account_id=? AND active=1').bind(companyId).first();
+      if(Number(current.n)>=300)return err('Maximum 300 active vehicles per company',409);
+      const id=crypto.randomUUID();
+      await env.DB.prepare('INSERT INTO fleet_vehicles(id,business_account_id,department_id,vehicle,make,model,model_year,label) VALUES(?,?,?,?,?,?,?,?)').bind(id,companyId,deptId,vehicle,make,model,year,label).run();
+      return json({ok:true,id},201);
+     }
+     const result=await env.DB.prepare('UPDATE fleet_vehicles SET department_id=?,vehicle=?,make=?,model=?,model_year=?,label=? WHERE id=? AND business_account_id=? AND active=1').bind(deptId,vehicle,make,model,year,label,itemId,companyId).run();
+     return result.meta?.changes?json({ok:true}):err('Vehicle not found',404);
+    }
+    if(method==='DELETE'&&itemId){
+     const result=await env.DB.prepare('UPDATE fleet_vehicles SET active=0 WHERE id=? AND business_account_id=? AND active=1').bind(itemId,companyId).run();
+     return result.meta?.changes?json({ok:true,message:'Vehicle removed from active fleet. Past bookings are preserved.'}):err('Vehicle not found',404);
+    }
+   }
+   return err('Method not allowed',405);
+  }
   if(method==='POST'&&/^admin\/business\/[0-9a-f-]{36}\/rotate$/.test(path)){
    const id=path.split('/')[2];
    const code='TM-BIZ-'+b64url(crypto.getRandomValues(new Uint8Array(14))).replace(/[^A-Z0-9]/gi,'').slice(0,18).toUpperCase();
    const row=await env.DB.prepare('UPDATE business_accounts SET code_hash=? WHERE id=?').bind(await codeHash(code,env),id).run();
    return row.meta?.changes?json({ok:true,code}):err('Business account not found',404);
   }
-  if(method==='PUT'&&path.startsWith('admin/business/')){
+  if(method==='PUT'&&/^admin\/business\/[0-9a-f-]{36}$/.test(path)){
    const id=path.split('/')[2],b=await readBody(request);if(!isId(id)&&!/^[0-9a-f-]{36}$/.test(id))return err('Invalid account');
    const c=await site(env),prices={};for(const v of c.vehicles){const n=Number(b?.prices?.[v.id]);if(!Number.isFinite(n)||n<0||n>10000)return err('Invalid business price');prices[v.id]=Math.round(n);}
-   await env.DB.prepare('UPDATE business_accounts SET label=?,pricing_json=?,active=? WHERE id=?').bind(text(b.label,100),JSON.stringify(prices),b.active?1:0,id).run();
-   return json({ok:true});
-  }
-  if(method==='GET'&&/^admin\/business\/[0-9a-f-]{36}\/fleet$/.test(path)){
-   const id=path.split('/')[2];const departments=await env.DB.prepare('SELECT id,name FROM fleet_departments WHERE business_account_id=? ORDER BY name').bind(id).all();
-   const fleet=await env.DB.prepare('SELECT f.*,d.name AS department FROM fleet_vehicles f LEFT JOIN fleet_departments d ON d.id=f.department_id WHERE f.business_account_id=? AND f.active=1 ORDER BY f.make,f.model').bind(id).all();
-   return json({ok:true,departments:departments.results||[],fleet:fleet.results||[]});
+   const label=text(b.label,100);if(label.length<2)return err('Enter a valid company name',400);
+   const updated=await env.DB.prepare('UPDATE business_accounts SET label=?,pricing_json=?,active=? WHERE id=?').bind(label,JSON.stringify(prices),b.active?1:0,id).run();
+   return updated.meta?.changes?json({ok:true}):err('Company not found',404);
   }
   if(method==='GET'&&path==='admin/bookings'){
    const rows=await env.DB.prepare('SELECT b.*,a.label AS business_label,f.make AS fleet_make,f.model AS fleet_model,f.label AS fleet_label,d.name AS department_name FROM bookings b LEFT JOIN business_accounts a ON a.id=b.business_account_id LEFT JOIN fleet_vehicles f ON f.id=b.fleet_vehicle_id LEFT JOIN fleet_departments d ON d.id=b.department_id ORDER BY b.appointment_date DESC,b.appointment_time DESC LIMIT 500').all();
