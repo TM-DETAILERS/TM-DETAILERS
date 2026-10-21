@@ -1,0 +1,51 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { chromium } from 'playwright';
+
+const read=file=>readFileSync(file,'utf8');
+let html=read('public/studio/index.html');
+const js=read('public/assets/studio-pro.js').replace("import { DEFAULT_SITE } from './defaults.js';",'');
+const defaults=read('public/assets/defaults.js').replace('export const DEFAULT_SITE','const DEFAULT_SITE');
+const css=read('public/assets/studio-pro.css');
+html=html.replace(/<link[^>]+href="\/assets\/studio-pro\.css"[^>]*>/g,'');
+html=html.replace('<script type="module" src="/assets/studio-pro.js"></script>','<style>'+css+'</style><script>window.TM_DEMO=true;</script><script>'+defaults+'\n'+js+'</script>');
+const browser=await chromium.launch({channel:'chrome',headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+const page=await browser.newPage({viewport:{width:1280,height:900}});
+const errors=[];
+page.on('pageerror',error=>errors.push(error.message));
+page.setDefaultTimeout(4500);
+try{
+ await page.setContent(html,{waitUntil:'domcontentloaded',timeout:15000});
+ assert.equal(await page.locator('#tm-login-form').count(),1,'login form available');
+ await page.locator('#tm-pass').fill('demo');
+ await page.locator('#tm-login-form button[type="submit"]').click();
+ await page.locator('#tm-workspace').waitFor({state:'visible'});
+ await page.locator('.tm-nav button[data-view="business"]').first().click();
+ await page.locator('button[data-company-open]').first().waitFor();
+ assert.ok((await page.locator('#tm-view-root').innerText()).includes('Northline Fleet'),'company visible in Owner Studio');
+ await page.locator('button[data-company-open]').first().click();
+ await page.locator('#tm-drawer').waitFor({state:'visible'});
+ await page.locator('#tm-company-edit-main').waitFor({state:'visible'});
+ assert.ok((await page.locator('#tm-drawer-body').innerText()).includes('Registered vehicles'),'owner opens fleet record');
+ await page.locator('#tm-company-edit-main').click();
+ await page.locator('#tm-update-company').waitFor({state:'visible'});
+ await page.locator('#tm-update-company [name="label"]').fill('Northline Fleet Updated');
+ await page.locator('#tm-update-company button[type="submit"]').click();
+ await page.waitForFunction(()=>document.querySelector('#tm-view-root')?.textContent?.includes('Northline Fleet Updated'));
+ assert.ok((await page.locator('#tm-view-root').innerText()).includes('Northline Fleet Updated'),'edited business account saved and displayed');
+ await page.locator('#tm-dept-add').click();
+ await page.locator('#tm-dept-form').waitFor({state:'visible'});
+ await page.locator('#tm-modal-close').click();
+ await page.locator('#tm-fleet-add').click();
+ await page.locator('#tm-fleet-form').waitFor({state:'visible'});
+ await page.locator('#tm-modal-close').click();
+ await page.locator('button[data-edit-fleet]').first().click();
+ await page.locator('#tm-fleet-form').waitFor({state:'visible'});
+ await page.locator('#tm-modal-close').click();
+ await page.locator('button[data-edit-dept]').first().click();
+ await page.locator('#tm-dept-form').waitFor({state:'visible'});
+ assert.deepEqual(errors,[],'no uncaught browser errors during company actions');
+ console.log('PASS: company opens; account edits persist; department and fleet controls open; no browser errors');
+}finally{
+ await browser.close();
+}
