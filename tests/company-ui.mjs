@@ -37,7 +37,7 @@ try{
  await page.locator('#tm-company-edit-main').click();
  await page.locator('#tm-update-company').waitFor({state:'visible'});
  await page.locator('#tm-update-company [name="label"]').fill('Northline Fleet Updated');
- await page.locator('#tm-update-company button[type="submit"]').click();
+ await page.locator('#tm-update-company button.tm-primary').click();
  await page.waitForFunction(()=>document.querySelector('#tm-view-root')?.textContent?.includes('Northline Fleet Updated'));
  assert.ok((await page.locator('#tm-view-root').innerText()).includes('Northline Fleet Updated'),'edited business account saved and displayed');
  await page.locator('#tm-dept-add').click();
